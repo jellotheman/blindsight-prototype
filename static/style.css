@@ -1,25 +1,134 @@
+:root {
+  color-scheme: dark light;
+  --bg: #0b0b0d;
+  --fg: #f4f4f5;
+  --accent: #4f8cff;
+  --muted: #9a9aa2;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
 body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
   font-family: system-ui, sans-serif;
-  max-width: 40rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+#key-gate {
+  max-width: 32rem;
   margin: 2rem auto;
   padding: 0 1rem;
 }
 
-#key-form {
+#key-gate label {
+  display: block;
+  margin-top: 1rem;
+}
+
+#key-gate input {
+  width: 100%;
+  font-size: 1rem;
+  padding: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+#key-gate button {
+  margin-top: 1rem;
+  padding: 0.5rem 1.5rem;
+  font-size: 1rem;
+}
+
+#app {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1.5rem;
+  flex-direction: column;
+  min-height: 100vh;
+  padding: 1rem;
+  gap: 1rem;
+}
+
+#tap-target {
+  flex: 1 0 60vh;
+  min-height: 60vh;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--accent);
+  border: none;
+  border-radius: 1rem;
+  cursor: pointer;
+  padding: 2rem;
+}
+
+#tap-target:focus-visible {
+  outline: 0.25rem solid var(--fg);
+  outline-offset: 0.25rem;
+}
+
+#tap-target[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#status {
+  min-height: 1.5rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+#excerpts-section h2 {
+  font-size: 1rem;
+  color: var(--muted);
+  font-weight: 500;
 }
 
 #excerpts {
   list-style: none;
   padding: 0;
+  margin: 0;
   display: grid;
   gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
 }
 
-#excerpts li {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
+#excerpts li button {
+  display: block;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--muted);
+  border-radius: 0.5rem;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+#excerpts li img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+#excerpts li span {
+  display: block;
+  padding: 0.5rem;
+  font-size: 0.9rem;
+}
+
+#change-key {
+  align-self: center;
+  background: none;
+  border: none;
+  color: var(--muted);
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: 0.9rem;
 }

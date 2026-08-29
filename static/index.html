@@ -7,20 +7,33 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <main>
-    <h1>BlindSight excerpt library</h1>
+  <section id="key-gate">
+    <h1>BlindSight</h1>
     <p>
       This reference client is an ordinary caller of the documented <code>/v1</code> HTTP
-      interface -- it holds no privileged access. Later tickets add the live capture flow and
-      spoken orientation; this walking skeleton shows the preloaded excerpts.
+      interface -- it holds no privileged access. Enter the shared key given to you out of band.
+      It is kept only in this browser's local storage.
     </p>
-    <section id="key-form">
-      <label for="api-key">Shared API key</label>
-      <input id="api-key" type="password" autocomplete="off" />
-      <button id="save-key">Save</button>
+    <label for="api-key">Shared API key</label>
+    <input id="api-key" type="password" autocomplete="off" />
+    <button id="save-key" type="button">Save</button>
+  </section>
+
+  <main id="app" hidden>
+    <button id="tap-target" type="button">
+      Tap the center of the screen to record.
+    </button>
+
+    <p id="status" role="status" aria-live="polite"></p>
+
+    <section id="excerpts-section">
+      <h2>Or choose a demonstration excerpt</h2>
+      <ul id="excerpts"></ul>
     </section>
-    <ul id="excerpts"></ul>
+
+    <button id="change-key" type="button">Change API key</button>
   </main>
+
   <script src="/static/app.js"></script>
 </body>
 </html>

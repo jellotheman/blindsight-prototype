@@ -39,6 +39,24 @@ BlindSight is not a navigation or mobility aid and makes no safety claim.
 The contract is ready to drive implementation. The first implementation target is the Stage 0
 contract test suite described in the specification.
 
+## Run locally, reachable from a phone
+
+The reference client's audio ladder and camera capture are only honestly testable from a real
+phone. One command starts the backend locally and publishes it through a Cloudflare quick tunnel,
+exposing the identical `/v1` interface a phone would reach on Modal:
+
+```powershell
+python -m tools.local_dev --api-key <any shared key you choose>
+```
+
+This requires `cloudflared` on `PATH` (<https://developers.cloudflare.com/cloudflared/downloads/>)
+and the `dev` extra installed (`pip install -e ".[dev]"`, which brings in `uvicorn`). It fails
+loudly if `cloudflared` is missing, the port is already in use, or no tunnel URL appears within 30
+seconds, and stops both the server and the tunnel on Ctrl+C. Requests need no change beyond the
+base URL between this tunnel and the Modal deployment. It uses the same in-memory store and
+deterministic provider as the walking-skeleton defaults; it does not exercise live Reka/Gemini,
+which belongs to issue #10.
+
 ## Run on Modal
 
 Modal authentication and application authentication are separate:

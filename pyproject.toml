@@ -23,6 +23,7 @@ dev = [
     "pillow>=10.0",
     "modal>=1.0",
     "mypy>=1.11",
+    "uvicorn>=0.30",
 ]
 
 [tool.pytest.ini_options]
