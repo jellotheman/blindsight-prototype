@@ -8,7 +8,9 @@ export BLINDSIGHT_URL="https://example--blindsight-web.modal.run"
 export BLINDSIGHT_API_KEY="replace-me"
 ```
 
-Never commit the real key or embed it in a distributed client build.
+Never commit the real key or embed it in a distributed client build. A browser or device client
+asks its user for the key once and keeps it in local storage; the deployment never injects the key
+into a served page.
 
 ## Stage 0: live capture with `curl`
 
@@ -146,6 +148,16 @@ curl --fail-with-body \
   -H "X-API-Key: $BLINDSIGHT_API_KEY"
 ```
 
+Poster images sit behind the same key. Fetch them rather than pointing an image
+source at the URL:
+
+```bash
+curl --fail-with-body \
+  "$BLINDSIGHT_URL/v1/excerpts/via-001-entry-02/poster" \
+  -H "X-API-Key: $BLINDSIGHT_API_KEY" \
+  -o poster.jpg
+```
+
 Start one through the same capture resource:
 
 ```bash
@@ -251,6 +263,14 @@ async function waitForCapture(captureId) {
   throw Object.assign(new Error("Capture did not settle within 90 seconds"), {
     code: "CLIENT_POLL_TIMEOUT",
   });
+}
+
+async function loadPosterObjectUrl(excerptId) {
+  const response = await fetch(`${baseUrl}/v1/excerpts/${excerptId}/poster`, {
+    headers: { "X-API-Key": apiKey },
+  });
+  if (!response.ok) throw new Error(`Poster fetch failed: ${response.status}`);
+  return URL.createObjectURL(await response.blob());
 }
 
 async function beginLiveCapture(mimeType = "video/webm") {

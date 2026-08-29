@@ -237,7 +237,7 @@ already spoke. Retained evidence is unaffected.
 - Attach Modal secrets when declaring the remote function. Do not probe for a secret from inside a
   running container and conditionally re-register the function.
 - Use one shared static API key in a Modal secret. Do not implement users, accounts, per-client keys,
-  or OAuth in Stage 0/1.
+  or OAuth in Stage 0/1. The reference client is an ordinary caller holding the key its user entered.
 - Keep local development and deployment equivalent at the HTTP interface: Cloudflare quick tunnels
   expose the local server to a phone; the Modal web endpoint is the deployed path.
 - Keep the reference client on the same deployment and forbid privileged in-process access.
@@ -274,6 +274,11 @@ Any client claiming Stage 0 support must implement the same interaction meanings
 - Speech uses platform-native client TTS. The web and Android voices may differ.
 - Stage 1 clients must speak the consent offer before requesting a captured-view check.
 - Clients must never turn a null answer into a confident negative claim.
+- The client asks its user for the shared API key once and keeps it in browser or device local
+  storage. The key is never baked into a client build and never embedded in a page served by the
+  deployment.
+- Poster images are fetched with the `X-API-Key` header and rendered from an object URL. A bare
+  image source cannot send the header.
 
 The tap target and audio ladder are specified behavior, not verified blind interaction. Nothing has
 been tried with the screen off or eyes closed. VoiceOver/TalkBack verification, local covered-lens

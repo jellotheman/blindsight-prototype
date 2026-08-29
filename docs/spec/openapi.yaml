@@ -47,6 +47,10 @@ paths:
       tags: [Excerpts]
       operationId: getExcerptPoster
       summary: Get the still poster for one demonstration excerpt
+      description: >-
+        Requires the X-API-Key header like every other /v1 operation. Clients fetch the poster
+        programmatically and render it from an object URL; a bare image source cannot send the
+        header.
       responses:
         "200":
           description: JPEG poster frame
