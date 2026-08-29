@@ -19,7 +19,7 @@ from .captures import CaptureService
 from .errors import ApiError, InternalError, NotFound
 from .evidence import EvidenceStore
 from .excerpts import ExcerptCatalog
-from .media import FfprobeMediaValidator, MediaValidator
+from .media import FfmpegChunkRemuxer, FfprobeMediaValidator, MediaRemuxer, MediaValidator
 from .media_urls import ProviderMediaUrls
 from .providers import CaptureProvider, DeterministicProvider
 from .storage import CaptureStore, MemoryCaptureStore
@@ -61,6 +61,7 @@ def create_app(
     store: CaptureStore | None = None,
     provider: CaptureProvider | None = None,
     media_validator: MediaValidator | None = None,
+    media_remuxer: MediaRemuxer | None = None,
     max_chunk_bytes: int = 10 * 1024 * 1024,
     max_capture_bytes: int = 100 * 1024 * 1024,
     evidence_store: EvidenceStore | None = None,
@@ -73,6 +74,7 @@ def create_app(
         provider=provider or DeterministicProvider(card_body=DEFAULT_CARD),
         catalog=catalog,
         media_validator=media_validator or FfprobeMediaValidator(),
+        media_remuxer=media_remuxer or FfmpegChunkRemuxer(),
         max_chunk_bytes=max_chunk_bytes,
         max_capture_bytes=max_capture_bytes,
         evidence_store=evidence_store,

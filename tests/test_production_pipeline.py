@@ -123,18 +123,73 @@ def test_two_invalid_reka_attempts_fall_through_to_one_recorded_gemini_call(
     assert (tmp_path / "runs" / settled["capture_id"] / "card.json").exists()
 
 
-def test_provider_transport_failure_does_not_masquerade_as_invalid_output(
+def test_reka_transport_failure_falls_through_to_gemini_without_a_wasted_retry(
     tmp_path: Path, api_key: str, auth_headers: dict[str, str]
 ) -> None:
     transport = ProviderAttempt(
         provider="reka",
-        model="reka-flash",
+        model="reka-edge-2603",
+        attempt=1,
+        failure_kind="transport",
+        error="Invalid video metadata None",
+    )
+    reka = ScriptedAdapter("reka", "reka-edge-2603", [transport])
+    gemini = ScriptedAdapter("gemini", "gemini-3.7-flash", [valid("gemini", 1)])
+    provider = ProductionProvider(
+        reka=reka,
+        gemini=gemini,
+        media_urls=MemoryMediaUrlStore("https://testserver"),
+    )
+    evidence = FileEvidenceStore(tmp_path / "runs")
+    client = TestClient(
+        create_app(
+            api_key=api_key,
+            provider=provider,
+            media_validator=AcceptingMediaValidator(),
+            evidence_store=evidence,
+        )
+    )
+
+    created = client.post(
+        "/v1/captures",
+        headers=auth_headers,
+        json={"source": {"type": "excerpt", "excerpt_id": "via-014-exit-01"}},
+    )
+    settled = wait_for_capture(client, created.headers["location"])
+
+    assert settled["status"] == "succeeded"
+    assert len(reka.calls) == 1
+    assert len(gemini.calls) == 1
+
+    run = json.loads((tmp_path / "runs" / settled["capture_id"] / "run.json").read_text())
+    assert [attempt["provider"] for attempt in run["attempts"]] == ["reka", "gemini"]
+    assert run["attempts"][0]["failure_kind"] == "transport"
+    assert run["selection"] == {
+        "provider": "gemini",
+        "model": "gemini-3.7-flash",
+        "attempt": 1,
+    }
+
+
+def test_transport_failure_on_both_providers_stays_provider_unavailable(
+    api_key: str, auth_headers: dict[str, str]
+) -> None:
+    reka_transport = ProviderAttempt(
+        provider="reka",
+        model="reka-edge-2603",
+        attempt=1,
+        failure_kind="transport",
+        error="Invalid video metadata None",
+    )
+    gemini_transport = ProviderAttempt(
+        provider="gemini",
+        model="gemini-3.7-flash",
         attempt=1,
         failure_kind="transport",
         error="upstream unavailable",
     )
-    reka = ScriptedAdapter("reka", "reka-flash", [transport])
-    gemini = ScriptedAdapter("gemini", "gemini-3.7-flash", [])
+    reka = ScriptedAdapter("reka", "reka-edge-2603", [reka_transport])
+    gemini = ScriptedAdapter("gemini", "gemini-3.7-flash", [gemini_transport])
     provider = ProductionProvider(
         reka=reka,
         gemini=gemini,
@@ -145,7 +200,6 @@ def test_provider_transport_failure_does_not_masquerade_as_invalid_output(
             api_key=api_key,
             provider=provider,
             media_validator=AcceptingMediaValidator(),
-            evidence_store=FileEvidenceStore(tmp_path / "runs"),
         )
     )
 
@@ -158,7 +212,8 @@ def test_provider_transport_failure_does_not_masquerade_as_invalid_output(
 
     assert settled["status"] == "failed"
     assert settled["failure"]["code"] == "PROVIDER_UNAVAILABLE"
-    assert len(gemini.calls) == 0
+    assert len(reka.calls) == 1
+    assert len(gemini.calls) == 1
 
 
 def test_overall_deadline_settles_a_wedged_provider_as_timeout(

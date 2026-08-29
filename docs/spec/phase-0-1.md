@@ -214,6 +214,11 @@ already spoke. Retained evidence is unaffected.
   storage. Never rely on container memory across requests.
 - Accept live media as numbered chunks and make repeated upload of identical chunk bytes
   idempotent. Reject the same index with different bytes.
+- Repair a live capture assembled from streamed chunks by copy-remuxing it through `ffmpeg`
+  before validating decodability or invoking a provider. `MediaRecorder` writes WebM/Matroska in
+  streaming mode and never patches the segment Duration/seek metadata once recording stops;
+  `ffprobe`'s codec/dimension check accepts the result, but Reka's ingestion rejects it outright.
+  Retained evidence keeps the repaired clip, since that is what a provider actually saw.
 - Validate assembled media before provider spend. A corrupt or incomplete capture is a capture
   failure, not a model failure.
 - Keep provider-specific ingestion behind internal adapters. The public interface exposes one
@@ -224,10 +229,15 @@ already spoke. Retained evidence is unaffected.
   unguessable HTTPS media URL. The URL is an internal provider transport, not a public client route.
 - Put the complete scene-card schema in the prompt and begin the assistant response with `{`.
   Validate the completed response with the sole scene-card validator.
-- Allow two Reka parse attempts. After two malformed or schema-invalid results, invoke the Gemini
-  fallback using its verified response-schema support.
-- Treat provider transport errors and timeouts separately from parse failures. Retry policy must be
-  bounded and visible in retained evidence.
+- Allow up to two Reka attempts when Reka responds but produces malformed or schema-invalid output;
+  after two such invalid results, invoke the Gemini fallback using its verified response-schema
+  support.
+- Treat provider transport errors and timeouts separately from parse failures: do not retry Reka
+  against its own transport error or timeout. Invoke the Gemini fallback immediately instead, so a
+  first-attempt Reka transport/timeout failure does not permanently forfeit a capture that Gemini
+  could still describe. Retry policy is therefore bounded to at most two Reka calls plus one Gemini
+  call, and every attempt made -- transport/timeout ones included -- remains part of retained
+  evidence.
 - Use Gemini as the measured fallback, not as a silent second opinion. Record which provider and
   attempt produced the accepted card.
 - Keep Reka Vision and self-hosted open-weight VLMs out of the Stage 0/1 implementation.
