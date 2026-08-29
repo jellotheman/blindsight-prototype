@@ -214,11 +214,14 @@ already spoke. Retained evidence is unaffected.
   storage. Never rely on container memory across requests.
 - Accept live media as numbered chunks and make repeated upload of identical chunk bytes
   idempotent. Reject the same index with different bytes.
-- Repair a live capture assembled from streamed chunks by copy-remuxing it through `ffmpeg`
-  before validating decodability or invoking a provider. `MediaRecorder` writes WebM/Matroska in
-  streaming mode and never patches the segment Duration/seek metadata once recording stops;
-  `ffprobe`'s codec/dimension check accepts the result, but Reka's ingestion rejects it outright.
-  Retained evidence keeps the repaired clip, since that is what a provider actually saw.
+- Repair a live capture assembled from streamed chunks through `ffmpeg` before validating
+  decodability or invoking a provider. `MediaRecorder` writes WebM/Matroska (VP8/VP9) in streaming
+  mode and never patches the segment Duration/seek metadata once recording stops; `ffprobe`
+  accepts the result, but Reka's ingestion cannot decode it -- it parses the container and then
+  yields zero frames. Transcode a live WebM to H.264 MP4 (the codec/container pair the preloaded
+  excerpt path already hands Reka successfully); copy-remux an already-MP4 live capture to repair
+  its streaming metadata without a lossy re-encode. Retained evidence keeps the repaired clip,
+  since that is what a provider actually saw.
 - Validate assembled media before provider spend. A corrupt or incomplete capture is a capture
   failure, not a model failure.
 - Keep provider-specific ingestion behind internal adapters. The public interface exposes one
@@ -258,6 +261,8 @@ already spoke. Retained evidence is unaffected.
 
 - Reka’s stable Chat model alias is `reka-flash`; deployments may override it after listing models.
 - Reka Chat accepts short video by reachable `video_url` and is documented as best below 30 seconds.
+- Reka Chat decodes H.264 MP4 but not browser WebM (VP8/VP9); live WebM captures must be
+  transcoded to H.264 MP4 before they reach Reka.
 - Reka Chat does not document JSON Schema response enforcement. Prefix, parse, validate, retry, and
   measured Gemini fallback are therefore required behavior.
 - A live capture necessarily crosses the phone’s uplink once when chunks are sent to Modal.

@@ -733,17 +733,50 @@ def _ffprobe_duration(ffprobe: str, content: bytes) -> float | None:
         path.unlink(missing_ok=True)
 
 
+def _ffprobe_video_codec(ffprobe: str, content: bytes) -> str | None:
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
+        handle.write(content)
+        path = Path(handle.name)
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        text = result.stdout.decode().strip()
+        return text if text else None
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def test_live_capture_assembled_from_streamed_chunks_is_repaired_before_provider_call(
     api_key: str, auth_headers: dict[str, str]
 ) -> None:
     """Reproduces the real defect: MediaRecorder-style chunks concatenate into a clip whose
-    duration/seek metadata was never patched. `ffprobe`'s codec/dimension check accepts that
-    clip -- Reka's ingestion does not. The backend must repair it before a provider ever sees it.
+    duration/seek metadata was never patched and whose VP8/VP9 bitstream Reka cannot decode.
+    `ffprobe`'s codec/dimension check accepts that clip -- Reka's ingestion does not. The backend
+    must transcode it to H.264 MP4 before a provider ever sees it.
     """
     ffmpeg = shutil.which("ffmpeg")
     ffprobe = shutil.which("ffprobe")
     if ffmpeg is None or ffprobe is None:
         pytest.skip("ffmpeg and ffprobe are required to reproduce a streamed-chunk capture")
+    if subprocess.run(
+        [ffmpeg, "-hide_banner", "-encoders"], capture_output=True, timeout=30
+    ).stdout.count(b"libx264") == 0:
+        pytest.skip("libx264 is required to reproduce the Reka-incompatible WebM transcode")
 
     streamed = subprocess.run(
         [
@@ -771,8 +804,8 @@ def test_live_capture_assembled_from_streamed_chunks_is_repaired_before_provider
         "fixture no longer reproduces the unpatched-duration defect"
     )
 
-    class DurationStrictProvider:
-        """Stands in for Reka: rejects video with no ffprobe-readable duration."""
+    class RekaLikeProvider:
+        """Stands in for Reka: rejects WebM bitstreams and clips with no readable duration."""
 
         def describe(self, evidence: CaptureEvidence) -> ProviderResult:
             if _ffprobe_duration(ffprobe, evidence.content) is None:
@@ -782,9 +815,18 @@ def test_live_capture_assembled_from_streamed_chunks_is_repaired_before_provider
                     failure_kind="transport",
                     error="Invalid video metadata None",
                 )
+            if evidence.media_type != "video/mp4" or _ffprobe_video_codec(
+                ffprobe, evidence.content
+            ) != "h264":
+                return ProviderResult(
+                    raw_text="",
+                    card_body=None,
+                    failure_kind="transport",
+                    error="Expected 6 frames, got 0 None",
+                )
             return ProviderResult(raw_text="valid", card_body=VALID_CARD_BODY)
 
-    client = TestClient(create_app(api_key=api_key, provider=DurationStrictProvider()))
+    client = TestClient(create_app(api_key=api_key, provider=RekaLikeProvider()))
     capture_id = client.post(
         "/v1/captures",
         headers=auth_headers,
