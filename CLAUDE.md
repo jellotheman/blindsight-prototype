@@ -22,7 +22,20 @@ calls are smoke tests, not the acceptance suite.
 - The HTTP interface is text-only. Clients own speech and interaction sounds.
 - Do not introduce persistent place memory or imply complete/current awareness.
 
-## Issue tracker
+## Agent skills
 
-Issues live in this repository's GitHub Issues. Fully specified implementation issues use the
-`ready-for-agent` label.
+### Issue tracker
+
+Issues live in this repository's GitHub Issues, driven through the `gh` CLI. Implementation tickets
+hang off the specification issue and carry native blocking edges. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings; fully specified implementation
+issues use `ready-for-agent`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repository root. See `docs/agents/domain.md`.
+The specification under `docs/spec/` outranks both, as the source-of-truth section above says.
