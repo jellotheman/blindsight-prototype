@@ -1,15 +1,17 @@
-"""Generate the placeholder demonstration excerpt manifest and poster images.
+"""Generate the placeholder demonstration excerpt manifest, posters, and eight-second clips.
 
 Real excerpts will be cut from licensed first-person footage (see REFERENCE.local.md for the
 private prototype's fetch/cut pipeline); that dataset prep is out of scope for the walking
 skeleton and needs network access to Hugging Face plus ffmpeg. Until that prep lands, these
-synthetic posters exercise the real listing-and-poster contract with real files on disk rather
-than mocked bytes. Re-run this script to regenerate them; nothing here should be hand-edited.
+synthetic media exercises the real listing, poster, decoding, and capture contracts with files on
+disk rather than mocked bytes. Re-run this script to regenerate it; nothing here should be
+hand-edited.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -32,13 +34,43 @@ def _make_poster(path: Path, label: str, color: tuple[int, int, int]) -> None:
     image.save(path, format="JPEG", quality=80)
 
 
+def _make_clip(poster_path: Path, clip_path: Path) -> None:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(poster_path),
+            "-t",
+            "8",
+            "-r",
+            "2",
+            "-vf",
+            "format=yuv420p",
+            "-c:v",
+            "libx264",
+            "-movflags",
+            "+faststart",
+            str(clip_path),
+        ],
+        check=True,
+    )
+
+
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     manifest_items = []
     for item, color in zip(DEMO_ITEMS, COLORS):
         poster_file = f"{item['excerpt_id']}.jpg"
-        _make_poster(OUT_DIR / poster_file, item["label"], color)
-        manifest_items.append({**item, "poster_file": poster_file})
+        clip_file = f"{item['excerpt_id']}.mp4"
+        poster_path = OUT_DIR / poster_file
+        _make_poster(poster_path, item["label"], color)
+        _make_clip(poster_path, OUT_DIR / clip_file)
+        manifest_items.append({**item, "poster_file": poster_file, "clip_file": clip_file})
 
     manifest = {"items": manifest_items}
     (OUT_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

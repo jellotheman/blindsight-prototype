@@ -4,19 +4,22 @@
       "excerpt_id": "via-001-entry-02",
       "label": "Elevator lobby",
       "duration_seconds": 8.0,
-      "poster_file": "via-001-entry-02.jpg"
+      "poster_file": "via-001-entry-02.jpg",
+      "clip_file": "via-001-entry-02.mp4"
     },
     {
       "excerpt_id": "via-014-exit-01",
       "label": "Shared kitchen",
       "duration_seconds": 8.0,
-      "poster_file": "via-014-exit-01.jpg"
+      "poster_file": "via-014-exit-01.jpg",
+      "clip_file": "via-014-exit-01.mp4"
     },
     {
       "excerpt_id": "via-027-entry-05",
       "label": "Dorm room doorway",
       "duration_seconds": 8.0,
-      "poster_file": "via-027-entry-05.jpg"
+      "poster_file": "via-027-entry-05.jpg",
+      "clip_file": "via-027-entry-05.mp4"
     }
   ]
 }

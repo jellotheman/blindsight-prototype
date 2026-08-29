@@ -10,6 +10,7 @@ runs/
 artifacts/
 *.webm
 *.mp4
+!data/excerpts/*.mp4
 *.wav
 *.log
 .modal/
