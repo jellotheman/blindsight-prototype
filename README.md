@@ -49,6 +49,22 @@ python -m modal serve modal_app.py
 The function declaration in `modal_app.py` attaches `blindsight-api-key`, so `serve` and `deploy`
 both receive `BLINDSIGHT_API_KEY` without placing it in source control or a local environment file.
 
+Production capture processing also requires a Modal secret named `blindsight-provider-keys` with
+`REKA_API_KEY` and `GEMINI_API_KEY`. Reka defaults to the stable `reka-flash` alias; override it
+with `BLINDSIGHT_REKA_MODEL` in that secret only after verifying the replacement model. Retained
+captures, raw attempts, usage, timings, selections, cards, and failures are written to the
+`blindsight-evidence` Modal Volume.
+
+Download retained run directories when re-judging a prompt or schema, then replay one or a set
+without changing the accepted record:
+
+```powershell
+python -m tools.replay --evidence-root runs --provider gemini --capture-id cap_example
+```
+
+Reka replay additionally needs the deployed HTTPS base URL so its short-lived media token can be
+stored in the shared Modal Dict and fetched by Reka.
+
 To update the persistent deployment manually, run:
 
 ```powershell

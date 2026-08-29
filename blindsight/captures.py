@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import threading
 import uuid
+from dataclasses import replace
+from queue import Empty, Queue
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from pydantic import ValidationError
 
 from .errors import ApiError, NotFound
+from .evidence import EvidenceStore, NullEvidenceStore, RunClock
 from .excerpts import ExcerptCatalog
 from .media import MediaValidator
-from .providers import CaptureEvidence, CaptureProvider
+from .providers import CaptureEvidence, CaptureProvider, ProviderResult
 from .scene_card import SceneCard, SceneCardBody
 from .storage import CaptureStore
 
@@ -41,6 +44,8 @@ class CaptureService:
         max_chunk_bytes: int = 10 * 1024 * 1024,
         max_capture_bytes: int = 100 * 1024 * 1024,
         runner: ThreadRunner | None = None,
+        evidence_store: EvidenceStore | None = None,
+        processing_deadline_seconds: float = 90.0,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -49,6 +54,8 @@ class CaptureService:
         self.max_chunk_bytes = max_chunk_bytes
         self.max_capture_bytes = max_capture_bytes
         self.runner = runner or ThreadRunner()
+        self.evidence_store = evidence_store or NullEvidenceStore()
+        self.processing_deadline_seconds = processing_deadline_seconds
 
     def create_excerpt(self, excerpt_id: str) -> dict[str, Any] | None:
         evidence = self.catalog.evidence_bytes(excerpt_id)
@@ -177,12 +184,26 @@ class CaptureService:
         resource = self.store.get_capture(capture_id)
         if resource is None:
             return
+        clock = RunClock()
+        evidence = replace(evidence, clock=clock)
         resource["updated_at"] = _now()
         try:
-            decodable = self.media_validator.is_decodable(evidence)
+            self.evidence_store.retain_capture(
+                capture_id,
+                resource["scene_session_id"],
+                resource["source"],
+                evidence,
+            )
         except Exception:
             self._settle_internal_error(resource)
             return
+        clock.mark("evidence_retained_ms")
+        try:
+            decodable = self.media_validator.is_decodable(evidence)
+        except Exception:
+            self._settle_internal_error(resource, clock=clock)
+            return
+        clock.mark("media_validated_ms")
         if not decodable:
             resource["status"] = "failed"
             resource["failure"] = {
@@ -190,12 +211,86 @@ class CaptureService:
                 "message": "The captured view was not decodable media.",
                 "retryable": False,
             }
+            resource["updated_at"] = _now()
+            clock.mark("completed_ms")
+            if not self._finish_evidence(
+                capture_id,
+                None,
+                accepted_card=None,
+                failure=resource["failure"],
+                timings=clock.as_dict(),
+            ):
+                self._settle_evidence_error(resource)
+                return
             self.store.put_capture(capture_id, resource)
             return
         try:
-            result = self.provider.describe(evidence)
+            remaining_seconds = clock.remaining_seconds(self.processing_deadline_seconds)
+            outcome: str
+            value: Any
+            if remaining_seconds <= 0:
+                outcome, value = ("timeout", None)
+            else:
+                outcome, value = self._describe_with_deadline(evidence, remaining_seconds)
+            if outcome == "timeout":
+                resource["status"] = "failed"
+                resource["failure"] = {
+                    "code": "PROVIDER_TIMEOUT",
+                    "message": "The provider exceeded the processing deadline.",
+                    "retryable": True,
+                }
+                resource["updated_at"] = _now()
+                clock.mark("completed_ms")
+                if not self._finish_evidence(
+                    capture_id,
+                    None,
+                    accepted_card=None,
+                    failure=resource["failure"],
+                    timings=clock.as_dict(),
+                ):
+                    self._settle_evidence_error(resource)
+                    return
+                self.store.put_capture(capture_id, resource)
+                return
+            if outcome == "error":
+                if isinstance(value, BaseException):
+                    raise value
+                raise RuntimeError("Provider execution failed without an exception.")
+            if not isinstance(value, ProviderResult):
+                raise RuntimeError("Provider returned an invalid result type.")
+            result = value
         except Exception:
-            self._settle_internal_error(resource)
+            self._settle_internal_error(resource, clock=clock)
+            return
+        clock.mark("provider_completed_ms")
+        if result.failure_kind is not None:
+            failure_code = {
+                "timeout": "PROVIDER_TIMEOUT",
+                "transport": "PROVIDER_UNAVAILABLE",
+                "invalid_output": "MODEL_OUTPUT_INVALID",
+            }[result.failure_kind]
+            resource["status"] = "failed"
+            resource["failure"] = {
+                "code": failure_code,
+                "message": {
+                    "timeout": "The provider timed out while processing the captured view.",
+                    "transport": "The provider was unavailable while processing the captured view.",
+                    "invalid_output": "The provider returned an invalid scene card.",
+                }[result.failure_kind],
+                "retryable": result.failure_kind in {"timeout", "transport"},
+            }
+            resource["updated_at"] = _now()
+            clock.mark("completed_ms")
+            if not self._finish_evidence(
+                capture_id,
+                result,
+                accepted_card=None,
+                failure=resource["failure"],
+                timings=clock.as_dict(),
+            ):
+                self._settle_evidence_error(resource)
+                return
+            self.store.put_capture(capture_id, resource)
             return
         try:
             body = SceneCardBody.model_validate(result.card_body)
@@ -215,13 +310,88 @@ class CaptureService:
                 evidence=[resource["capture_id"]],
                 card=body,
             ).model_dump(mode="json")
+        resource["updated_at"] = _now()
+        clock.mark("completed_ms")
+        if not self._finish_evidence(
+            capture_id,
+            result,
+            accepted_card=resource["card"],
+            failure=resource["failure"],
+            timings=clock.as_dict(),
+        ):
+            self._settle_evidence_error(resource)
+            return
         self.store.put_capture(capture_id, resource)
 
-    def _settle_internal_error(self, resource: dict[str, Any]) -> None:
+    def _describe_with_deadline(
+        self, evidence: CaptureEvidence, timeout_seconds: float
+    ) -> tuple[str, Any]:
+        results: Queue[tuple[str, Any]] = Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                results.put(("result", self.provider.describe(evidence)))
+            except Exception as exc:
+                results.put(("error", exc))
+
+        worker = threading.Thread(target=invoke, daemon=True)
+        worker.start()
+        try:
+            return results.get(timeout=timeout_seconds)
+        except Empty:
+            return ("timeout", None)
+
+    def _settle_internal_error(
+        self, resource: dict[str, Any], *, clock: RunClock | None = None
+    ) -> None:
         resource["status"] = "failed"
         resource["failure"] = {
             "code": "INTERNAL_ERROR",
             "message": "The capture could not be processed.",
+            "retryable": True,
+        }
+        resource["updated_at"] = _now()
+        if clock is not None:
+            clock.mark("completed_ms")
+            try:
+                self.evidence_store.finish(
+                    resource["capture_id"],
+                    None,
+                    accepted_card=None,
+                    failure=resource["failure"],
+                    timings=clock.as_dict(),
+                )
+            except Exception:
+                pass
+        self.store.put_capture(resource["capture_id"], resource)
+
+    def _finish_evidence(
+        self,
+        capture_id: str,
+        result: Any,
+        *,
+        accepted_card: dict[str, Any] | None,
+        failure: dict[str, Any] | None,
+        timings: dict[str, float],
+    ) -> bool:
+        try:
+            self.evidence_store.finish(
+                capture_id,
+                result,
+                accepted_card=accepted_card,
+                failure=failure,
+                timings=timings,
+            )
+        except Exception:
+            return False
+        return True
+
+    def _settle_evidence_error(self, resource: dict[str, Any]) -> None:
+        resource["status"] = "failed"
+        resource["card"] = None
+        resource["failure"] = {
+            "code": "INTERNAL_ERROR",
+            "message": "The capture evidence could not be retained.",
             "retryable": True,
         }
         resource["updated_at"] = _now()

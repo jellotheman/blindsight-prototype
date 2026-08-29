@@ -17,8 +17,10 @@ from fastapi.responses import JSONResponse, Response
 from .auth import ApiKeyMiddleware
 from .captures import CaptureService
 from .errors import ApiError, InternalError, NotFound
+from .evidence import EvidenceStore
 from .excerpts import ExcerptCatalog
 from .media import FfprobeMediaValidator, MediaValidator
+from .media_urls import ProviderMediaUrls
 from .providers import CaptureProvider, DeterministicProvider
 from .storage import CaptureStore, MemoryCaptureStore
 
@@ -61,6 +63,9 @@ def create_app(
     media_validator: MediaValidator | None = None,
     max_chunk_bytes: int = 10 * 1024 * 1024,
     max_capture_bytes: int = 100 * 1024 * 1024,
+    evidence_store: EvidenceStore | None = None,
+    media_urls: ProviderMediaUrls | None = None,
+    processing_deadline_seconds: float = 90.0,
 ) -> FastAPI:
     catalog = ExcerptCatalog(manifest_path)
     capture_service = CaptureService(
@@ -70,10 +75,23 @@ def create_app(
         media_validator=media_validator or FfprobeMediaValidator(),
         max_chunk_bytes=max_chunk_bytes,
         max_capture_bytes=max_capture_bytes,
+        evidence_store=evidence_store,
+        processing_deadline_seconds=processing_deadline_seconds,
     )
 
     app = FastAPI(title="BlindSight Stage 0/1 API")
     app.add_middleware(ApiKeyMiddleware, api_key=api_key)
+
+    @app.get("/_provider-media/{token}", include_in_schema=False)
+    def get_provider_media(token: str) -> Response:
+        item = media_urls.resolve(token) if media_urls is not None else None
+        if item is None:
+            return Response(status_code=404)
+        return Response(
+            content=item.content,
+            media_type=item.media_type,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.exception_handler(ApiError)
     async def _api_error(request: Request, exc: ApiError) -> JSONResponse:
