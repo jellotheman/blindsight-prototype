@@ -46,6 +46,10 @@ body {
   font-size: 1rem;
 }
 
+#app[hidden] {
+  display: none;
+}
+
 #app {
   display: flex;
   flex-direction: column;
