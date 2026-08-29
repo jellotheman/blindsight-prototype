@@ -1,0 +1,847 @@
+openapi: 3.1.0
+info:
+  title: BlindSight Stage 0/1 API
+  version: 0.1.0
+  description: >-
+    Text-only captured-view understanding API. Clients own camera interaction, speech, and
+    earcons. The API makes no safety, navigation, or mobility-aid claim.
+servers:
+  - url: https://example--blindsight-web.modal.run
+    description: Deployed Modal application; replace with the published deployment URL.
+  - url: https://example.trycloudflare.com
+    description: Local development through a Cloudflare quick tunnel.
+security:
+  - ApiKey: []
+tags:
+  - name: Excerpts
+  - name: Captures
+  - name: Questions
+paths:
+  /v1/excerpts:
+    get:
+      tags: [Excerpts]
+      operationId: listExcerpts
+      summary: List preloaded demonstration excerpts
+      responses:
+        "200":
+          description: Available excerpts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Excerpt"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/excerpts/{excerpt_id}/poster:
+    parameters:
+      - $ref: "#/components/parameters/ExcerptId"
+    get:
+      tags: [Excerpts]
+      operationId: getExcerptPoster
+      summary: Get the still poster for one demonstration excerpt
+      responses:
+        "200":
+          description: JPEG poster frame
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              example: public, max-age=86400
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/captures:
+    post:
+      tags: [Captures]
+      operationId: createCapture
+      summary: Start a fresh capture and scene session
+      description: >-
+        A live source begins in recording state. An excerpt source begins processing immediately.
+        Every call creates a fresh scene session; captured evidence is never merged with a prior
+        session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCaptureRequest"
+            examples:
+              live:
+                value:
+                  source:
+                    type: live
+                    mime_type: video/webm
+              excerpt:
+                value:
+                  source:
+                    type: excerpt
+                    excerpt_id: via-001-entry-02
+      responses:
+        "201":
+          description: Capture created
+          headers:
+            Location:
+              description: Poll URL for the capture resource
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/captures/{capture_id}/chunks/{index}:
+    parameters:
+      - $ref: "#/components/parameters/CaptureId"
+      - name: index
+        in: path
+        required: true
+        description: Zero-based chunk index. Arrival order is irrelevant.
+        schema:
+          type: integer
+          minimum: 0
+          maximum: 9999
+    put:
+      tags: [Captures]
+      operationId: putCaptureChunk
+      summary: Upload one numbered live-capture chunk
+      description: >-
+        Repeating an index with byte-identical content is idempotent. Repeating an index with
+        different content returns CHUNK_CONFLICT. Chunks are accepted only while status is
+        recording.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Chunk accepted or confirmed idempotently
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChunkReceipt"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/captures/{capture_id}/complete:
+    parameters:
+      - $ref: "#/components/parameters/CaptureId"
+    post:
+      tags: [Captures]
+      operationId: completeCapture
+      summary: Close live ingestion and start asynchronous understanding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompleteCaptureRequest"
+            example:
+              chunk_count: 8
+              mime_type: video/webm
+      responses:
+        "202":
+          description: Capture accepted for processing
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/captures/{capture_id}:
+    parameters:
+      - $ref: "#/components/parameters/CaptureId"
+    get:
+      tags: [Captures]
+      operationId: getCapture
+      summary: Poll capture state and retrieve the scene card
+      responses:
+        "200":
+          description: Current capture resource
+          headers:
+            Retry-After:
+              description: Present while processing
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureResource"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/scene-sessions/{scene_session_id}/questions:
+    parameters:
+      - $ref: "#/components/parameters/SceneSessionId"
+    post:
+      tags: [Questions]
+      operationId: createQuestion
+      summary: Ask the active scene card first
+      description: >-
+        This operation never invokes the video provider. A card miss settles as
+        needs_clip_consent so the client can obtain explicit user consent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuestionRequest"
+            example:
+              question: What colour was the mug on the table?
+      responses:
+        "202":
+          description: Card-grounded question accepted
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/scene-sessions/{scene_session_id}/questions/{question_id}:
+    parameters:
+      - $ref: "#/components/parameters/SceneSessionId"
+      - $ref: "#/components/parameters/QuestionId"
+    get:
+      tags: [Questions]
+      operationId: getQuestion
+      summary: Poll a card or captured-view question
+      responses:
+        "200":
+          description: Current question resource
+          headers:
+            Retry-After:
+              description: Present while processing
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionResource"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/scene-sessions/{scene_session_id}/questions/{question_id}/clip-check:
+    parameters:
+      - $ref: "#/components/parameters/SceneSessionId"
+      - $ref: "#/components/parameters/QuestionId"
+    post:
+      tags: [Questions]
+      operationId: checkCapturedView
+      summary: Re-check the stored captured view after explicit consent
+      description: >-
+        Valid only when the question is in needs_clip_consent. Calling this operation is the
+        client's assertion that explicit user consent was obtained.
+      responses:
+        "202":
+          description: Captured-view check accepted
+          headers:
+            Location:
+              schema:
+                type: string
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              example: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuestionResource"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/scene-sessions/{scene_session_id}:
+    parameters:
+      - $ref: "#/components/parameters/SceneSessionId"
+    delete:
+      tags: [Questions]
+      operationId: deleteSceneSession
+      summary: End the scene session and clear its conversation
+      responses:
+        "204":
+          description: Scene session ended
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Shared team key stored in a Modal secret.
+  parameters:
+    CaptureId:
+      name: capture_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    ExcerptId:
+      name: excerpt_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    SceneSessionId:
+      name: scene_session_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    QuestionId:
+      name: question_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+  responses:
+    BadRequest:
+      description: Malformed or semantically invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INVALID_REQUEST
+              message: chunk_count must be at least 1
+              retryable: false
+              details: {}
+    Unauthorized:
+      description: Missing or incorrect shared API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: A valid X-API-Key header is required.
+              retryable: false
+              details: {}
+    NotFound:
+      description: Requested resource does not exist or is no longer active
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: NOT_FOUND
+              message: The requested resource was not found.
+              retryable: false
+              details: {}
+    Conflict:
+      description: Request conflicts with current resource state or stored chunk bytes
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            invalidState:
+              value:
+                error:
+                  code: INVALID_STATE
+                  message: The capture is no longer accepting chunks.
+                  retryable: false
+                  details:
+                    status: processing
+            missingChunks:
+              value:
+                error:
+                  code: CAPTURE_INCOMPLETE
+                  message: One or more declared chunks have not arrived.
+                  retryable: true
+                  details:
+                    missing_indices: [3, 6]
+            chunkConflict:
+              value:
+                error:
+                  code: CHUNK_CONFLICT
+                  message: This chunk index already contains different bytes.
+                  retryable: false
+                  details:
+                    index: 3
+    TooLarge:
+      description: Chunk or accumulated capture exceeds configured limits
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: CAPTURE_TOO_LARGE
+              message: The capture exceeds the configured byte limit.
+              retryable: false
+              details: {}
+    UnsupportedMedia:
+      description: Unsupported capture MIME type
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: UNSUPPORTED_MEDIA_TYPE
+              message: Supported live capture types are video/webm and video/mp4.
+              retryable: false
+              details: {}
+    InternalError:
+      description: Unexpected server failure
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: INTERNAL_ERROR
+              message: The request could not be completed.
+              retryable: true
+              details: {}
+  schemas:
+    Identifier:
+      type: string
+      minLength: 8
+      maxLength: 64
+      pattern: "^[A-Za-z0-9_-]+$"
+      example: cap_01J67J4JYG9X5Q20MZB6S8N7P3
+    Excerpt:
+      type: object
+      additionalProperties: false
+      required: [excerpt_id, label, duration_seconds, poster_url]
+      properties:
+        excerpt_id:
+          $ref: "#/components/schemas/Identifier"
+        label:
+          type: string
+          minLength: 1
+          example: Elevator lobby
+        duration_seconds:
+          type: number
+          minimum: 0.1
+          maximum: 30
+          example: 8
+        poster_url:
+          type: string
+          format: uri-reference
+          example: /v1/excerpts/via-001-entry-02/poster
+    LiveSource:
+      type: object
+      additionalProperties: false
+      required: [type, mime_type]
+      properties:
+        type:
+          const: live
+        mime_type:
+          type: string
+          enum: [video/webm, video/mp4]
+    ExcerptSource:
+      type: object
+      additionalProperties: false
+      required: [type, excerpt_id]
+      properties:
+        type:
+          const: excerpt
+        excerpt_id:
+          $ref: "#/components/schemas/Identifier"
+    CaptureSource:
+      oneOf:
+        - $ref: "#/components/schemas/LiveSource"
+        - $ref: "#/components/schemas/ExcerptSource"
+      discriminator:
+        propertyName: type
+        mapping:
+          live: "#/components/schemas/LiveSource"
+          excerpt: "#/components/schemas/ExcerptSource"
+    CreateCaptureRequest:
+      type: object
+      additionalProperties: false
+      required: [source]
+      properties:
+        source:
+          $ref: "#/components/schemas/CaptureSource"
+    CompleteCaptureRequest:
+      type: object
+      additionalProperties: false
+      required: [chunk_count, mime_type]
+      properties:
+        chunk_count:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: Declared total; every index from zero through chunk_count minus one must exist.
+        mime_type:
+          type: string
+          enum: [video/webm, video/mp4]
+    ChunkReceipt:
+      type: object
+      additionalProperties: false
+      required: [capture_id, index, bytes, idempotent]
+      properties:
+        capture_id:
+          $ref: "#/components/schemas/Identifier"
+        index:
+          type: integer
+          minimum: 0
+        bytes:
+          type: integer
+          minimum: 1
+        idempotent:
+          type: boolean
+          description: True when identical bytes were already stored at this index.
+    CaptureStatus:
+      type: string
+      enum: [recording, processing, succeeded, failed]
+    FailureCode:
+      type: string
+      enum:
+        - CAPTURE_INCOMPLETE
+        - CAPTURE_UNDECODABLE
+        - PROVIDER_TIMEOUT
+        - PROVIDER_UNAVAILABLE
+        - MODEL_OUTPUT_INVALID
+        - INTERNAL_ERROR
+    AsyncFailure:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code:
+          $ref: "#/components/schemas/FailureCode"
+        message:
+          type: string
+          minLength: 1
+        retryable:
+          type: boolean
+    CaptureResource:
+      type: object
+      additionalProperties: false
+      required:
+        - capture_id
+        - scene_session_id
+        - source
+        - status
+        - card
+        - failure
+        - created_at
+        - updated_at
+      properties:
+        capture_id:
+          $ref: "#/components/schemas/Identifier"
+        scene_session_id:
+          $ref: "#/components/schemas/Identifier"
+        source:
+          $ref: "#/components/schemas/CaptureSource"
+        status:
+          $ref: "#/components/schemas/CaptureStatus"
+        card:
+          oneOf:
+            - $ref: "#/components/schemas/SceneCard"
+            - type: "null"
+        failure:
+          oneOf:
+            - $ref: "#/components/schemas/AsyncFailure"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Confidence:
+      type: string
+      enum: [high, medium, low]
+    Distance:
+      type: string
+      enum: [close, middle, far]
+    LayoutItem:
+      type: object
+      additionalProperties: false
+      required: [thing, relationship, distance, confidence]
+      properties:
+        thing:
+          type: string
+          minLength: 1
+          description: Plain object identity; never deliberately vague for terseness.
+        relationship:
+          type: [string, "null"]
+          minLength: 1
+          description: Evidence-grounded relationship such as beside the counter or along the wall.
+        distance:
+          oneOf:
+            - $ref: "#/components/schemas/Distance"
+            - type: "null"
+        confidence:
+          $ref: "#/components/schemas/Confidence"
+    PersonObservation:
+      type: object
+      additionalProperties: false
+      required: [count_description, relationship, activity, confidence]
+      properties:
+        count_description:
+          type: string
+          minLength: 1
+          example: two or three people
+        relationship:
+          type: [string, "null"]
+          minLength: 1
+          description: Position relative to observed landmarks; not identity.
+        activity:
+          type: [string, "null"]
+          minLength: 1
+          description: Apparent activity only.
+        confidence:
+          $ref: "#/components/schemas/Confidence"
+    ClaimUncertainty:
+      type: object
+      additionalProperties: false
+      required: [claim, detail]
+      properties:
+        claim:
+          type: string
+          minLength: 1
+          description: The exact affected claim.
+          example: The opening beside the counter is a doorway.
+        detail:
+          type: string
+          minLength: 1
+          description: What is uncertain about that claim.
+          example: It may instead be a full-height window.
+    SceneCardBody:
+      type: object
+      additionalProperties: false
+      required:
+        - place_type
+        - place_type_confidence
+        - overview
+        - layout
+        - open_space
+        - people
+        - visual_character
+        - uncertainties
+      properties:
+        place_type:
+          type: [string, "null"]
+          minLength: 1
+        place_type_confidence:
+          oneOf:
+            - $ref: "#/components/schemas/Confidence"
+            - type: "null"
+        overview:
+          type: string
+          minLength: 1
+          description: Natural 30–45-word orientation; hard maximum 50 words.
+        layout:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/LayoutItem"
+            - type: "null"
+        open_space:
+          type: [string, "null"]
+          minLength: 1
+        people:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/PersonObservation"
+            - type: "null"
+        visual_character:
+          type: [string, "null"]
+          minLength: 1
+          description: Directly observed colour, lighting, and materials only.
+        uncertainties:
+          oneOf:
+            - type: array
+              minItems: 1
+              items:
+                $ref: "#/components/schemas/ClaimUncertainty"
+            - type: "null"
+    SceneCard:
+      type: object
+      additionalProperties: false
+      required: [capture_id, scene_session_id, revision, evidence, card]
+      properties:
+        capture_id:
+          $ref: "#/components/schemas/Identifier"
+        scene_session_id:
+          $ref: "#/components/schemas/Identifier"
+        revision:
+          type: integer
+          minimum: 1
+        evidence:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/Identifier"
+        card:
+          $ref: "#/components/schemas/SceneCardBody"
+    CreateQuestionRequest:
+      type: object
+      additionalProperties: false
+      required: [question]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 1000
+    QuestionStatus:
+      type: string
+      enum: [processing, answered, needs_clip_consent, unanswerable, failed]
+    AnswerSource:
+      type: string
+      enum: [scene_card, captured_view]
+    QuestionResource:
+      type: object
+      additionalProperties: false
+      required:
+        - question_id
+        - scene_session_id
+        - question
+        - status
+        - answer
+        - source
+        - failure
+        - created_at
+        - updated_at
+      properties:
+        question_id:
+          $ref: "#/components/schemas/Identifier"
+        scene_session_id:
+          $ref: "#/components/schemas/Identifier"
+        question:
+          type: string
+          minLength: 1
+        status:
+          $ref: "#/components/schemas/QuestionStatus"
+        answer:
+          type: [string, "null"]
+          minLength: 1
+        source:
+          oneOf:
+            - $ref: "#/components/schemas/AnswerSource"
+            - type: "null"
+        failure:
+          oneOf:
+            - $ref: "#/components/schemas/AsyncFailure"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ErrorObject:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable, details]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+        retryable:
+          type: boolean
+        details:
+          type: object
+          additionalProperties: true
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorObject"

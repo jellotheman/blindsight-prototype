@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+runs/
+artifacts/
+*.webm
+*.mp4
+*.wav
+*.log
+.modal/
+node_modules/
+dist/
