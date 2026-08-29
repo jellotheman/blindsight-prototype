@@ -102,9 +102,12 @@ paths:
           description: Capture created
           headers:
             Location:
-              description: Poll URL for the capture resource
+              description: >-
+                Poll path for the capture resource, relative to this request's base URL (never an
+                absolute URL on a different origin).
               schema:
                 type: string
+              example: /v1/captures/cap_01J67J4JYG9X5Q20MZB6S8N7P3
           content:
             application/json:
               schema:
@@ -137,7 +140,8 @@ paths:
       description: >-
         Repeating an index with byte-identical content is idempotent. Repeating an index with
         different content returns CHUNK_CONFLICT. Chunks are accepted only while status is
-        recording.
+        recording. A single chunk is limited to 10 MiB and the accumulated capture to 100 MiB;
+        exceeding either returns 413 CAPTURE_TOO_LARGE.
       requestBody:
         required: true
         content:
@@ -187,8 +191,11 @@ paths:
           description: Capture accepted for processing
           headers:
             Location:
+              description: >-
+                Poll path for the capture resource, relative to this request's base URL.
               schema:
                 type: string
+              example: /v1/captures/cap_01J67J4JYG9X5Q20MZB6S8N7P3
             Retry-After:
               schema:
                 type: integer
@@ -259,8 +266,11 @@ paths:
           description: Card-grounded question accepted
           headers:
             Location:
+              description: >-
+                Poll path for the question resource, relative to this request's base URL.
               schema:
                 type: string
+              example: /v1/scene-sessions/ses_01J67J4K0BT3WD5H1RV2N7Q6XM/questions/que_01J67K73MPCZG9HTV4A2F6Y1WR
             Retry-After:
               schema:
                 type: integer
@@ -323,8 +333,11 @@ paths:
           description: Captured-view check accepted
           headers:
             Location:
+              description: >-
+                Poll path for the same question resource, relative to this request's base URL.
               schema:
                 type: string
+              example: /v1/scene-sessions/ses_01J67J4K0BT3WD5H1RV2N7Q6XM/questions/que_01J67K73MPCZG9HTV4A2F6Y1WR
             Retry-After:
               schema:
                 type: integer
@@ -462,7 +475,8 @@ components:
                   details:
                     index: 3
     TooLarge:
-      description: Chunk or accumulated capture exceeds configured limits
+      description: >-
+        A single chunk exceeded 10 MiB, or the capture's accumulated bytes exceeded 100 MiB.
       content:
         application/json:
           schema:
@@ -612,6 +626,11 @@ components:
           minLength: 1
         retryable:
           type: boolean
+          description: >-
+            True when the same underlying problem is plausibly transient. The capture or question
+            resource itself is terminal either way -- there is no resubmit operation on it -- so a
+            client acts on this by starting a new capture or question with the same source, not by
+            retrying a request against this resource.
     CaptureResource:
       type: object
       additionalProperties: false

@@ -29,6 +29,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "live: exercises real Reka/Gemini through a deployed Modal app; secret-gated, skipped by default",
+]
 
 [build-system]
 requires = ["setuptools>=68"]

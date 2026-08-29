@@ -92,6 +92,31 @@ python -m tools.replay --evidence-root runs --provider gemini --capture-id cap_e
 Reka replay additionally needs the deployed HTTPS base URL so its short-lived media token can be
 stored in the shared Modal Dict and fetched by Reka.
 
+## Live-provider smoke tests
+
+`python -m pytest` never exercises real Reka or Gemini -- every test in
+`tests/test_live_providers.py` is secret-gated and skips by default. It is the smoke suite issue
+#10 requires: real Reka fetching a clip through the actual Modal-hosted short-lived media URL, and
+a real Gemini fallback call, both against a currently-deployed instance of `modal_app.py`. Run it
+with:
+
+```powershell
+$env:REKA_API_KEY = "<reka key>"
+$env:GEMINI_API_KEY = "<gemini key>"
+$env:BLINDSIGHT_LIVE_PUBLIC_BASE_URL = "https://<workspace>--blindsight-api-web.modal.run"
+python -m pytest tests/test_live_providers.py -v -m live
+```
+
+Reading the shared Modal Dict for Reka's media token additionally needs a local Modal identity
+(`modal token new`, or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET`), exactly like `tools/replay.py`'s
+Reka path. When that identity can also reach the `blindsight-excerpts` volume, the suite samples
+real demonstration clips from it (`BLINDSIGHT_LIVE_EXCERPT_SAMPLE`, default 3) instead of the small
+synthetic clips bundled for local development; it falls back to those automatically otherwise.
+Each run is retained under `runs/smoke/` through the same `FileEvidenceStore` production
+uses; the test reads back `runs/smoke/index.jsonl` to report the validated-card rate. Per
+`docs/spec/phase-0-1.md`, no measured Reka quality or latency claim belongs in the specification
+until a human has actually read a recorded run -- a green check on this suite is not that claim.
+
 To update the persistent deployment manually, run:
 
 ```powershell
