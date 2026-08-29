@@ -74,7 +74,8 @@ paths:
       description: >-
         A live source begins in recording state. An excerpt source begins processing immediately.
         Every call creates a fresh scene session; captured evidence is never merged with a prior
-        session.
+        session. Ending an earlier scene session is a client action: the shared key carries no
+        client identity, so the server cannot infer which session a new capture supersedes.
       requestBody:
         required: true
         content:
@@ -344,6 +345,9 @@ paths:
       tags: [Questions]
       operationId: deleteSceneSession
       summary: End the scene session and clear its conversation
+      description: >-
+        Ends the conversation for this scene session. Later question operations on it return
+        NOT_FOUND. The capture resource remains readable and retained evidence is unaffected.
       responses:
         "204":
           description: Scene session ended

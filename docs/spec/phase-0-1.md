@@ -153,7 +153,9 @@ and plain abstention. It is specified in full but built after all Stage 0 criter
 5. Only an explicit client request after user consent starts the video-model check.
 6. If the video model answers, the client speaks it. If it returns `null`, the client says, “I
    couldn’t tell from the capture.”
-7. “Done,” a new capture, or application shutdown deletes the scene session and its conversation.
+7. “Done,” a new capture, or application shutdown ends the scene session. The client deletes it
+   explicitly. The shared key carries no client identity, so the backend cannot infer which earlier
+   scene session a new capture supersedes.
 
 ## Scene-card contract
 
@@ -198,6 +200,10 @@ Capture and question processing are asynchronous resources. A successful submiss
 or `201`; clients poll the resource URL and respect `Retry-After` when present. Asynchronous
 provider failures appear as a stable failure object on the resource rather than changing the
 already-returned submission response.
+
+Deleting a scene session ends its conversation. Question operations on that scene session then
+return `NOT_FOUND`, while the capture resource stays readable so a client can re-read the card it
+already spoke. Retained evidence is unaffected.
 
 ## Implementation Decisions
 
@@ -358,7 +364,8 @@ shapes.
 - Only the explicit captured-view-check operation invokes the video provider.
 - A captured-view answer and a second miss are distinguishable.
 - Answers use capture-scoped language whenever freshness matters.
-- New capture and scene-session deletion prevent later access to old conversational context.
+- Scene-session deletion prevents later access to that conversation, and every new capture starts a
+  fresh scene session that never inherits earlier conversational context.
 
 ## Out of Scope
 
