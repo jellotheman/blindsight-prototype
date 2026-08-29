@@ -4,6 +4,9 @@ Read `CONTEXT.md`, `docs/spec/phase-0-1.md`, and `docs/spec/openapi.yaml` before
 implementing. The OpenAPI document is the public interface. If prose and OpenAPI disagree, stop and
 correct the specification before coding.
 
+Also read `REFERENCE.local.md` if it is present in the repository root. It is untracked and may be
+absent; its absence is not an error, and it never overrides the specification.
+
 ## Test seam
 
 Test through the public HTTP interface using real request/response serialization and deterministic

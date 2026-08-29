@@ -4,6 +4,8 @@ BlindSight helps blind and low-vision people understand what they looked at duri
 user-triggered camera capture. It describes the captured view without claiming complete or current
 awareness of the surrounding place.
 
+Read `REFERENCE.local.md` as well if it is present in your checkout.
+
 **Capture:** An eight-second, user-triggered recording of whatever the camera sees while the user
 looks or points it around. It has no required turn, pace, direction, or coverage target. Avoid
 *scan*.
