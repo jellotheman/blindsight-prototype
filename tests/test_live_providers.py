@@ -195,7 +195,7 @@ def _run_and_retain(
     return result
 
 
-def test_live_reka_produces_validated_cards_for_sampled_excerpts() -> None:
+def test_live_produces_validated_cards() -> None:
     media_urls = _live_media_urls()
     provider = ProductionProvider(reka=RekaChatAdapter(), gemini=GeminiAdapter(), media_urls=media_urls)
     evidence_store = FileEvidenceStore(EVIDENCE_ROOT)
@@ -235,7 +235,14 @@ def test_live_reka_produces_validated_cards_for_sampled_excerpts() -> None:
     assert 0.0 <= validated_card_rate <= 1.0
 
 
-def test_live_reka_media_failure_falls_through_to_a_real_gemini_answer() -> None:
+def test_live_transport_failure_fails_the_capture() -> None:
+    """A dead media URL is a transport failure: the capture fails and Gemini is never invoked.
+
+    ProductionProvider treats transport/timeout differently from invalid_output (providers.py):
+    invalid output gets two Reka attempts and then one Gemini fallback; a transport failure
+    short-circuits immediately as a failed capture. This smoke run checks that behavior against
+    Reka's real API, which may surface the dead URL as either.
+    """
     provider = ProductionProvider(
         reka=RekaChatAdapter(),
         gemini=GeminiAdapter(),
@@ -245,15 +252,7 @@ def test_live_reka_media_failure_falls_through_to_a_real_gemini_answer() -> None
 
     result = provider.describe(CaptureEvidence(content=clip.content, media_type=clip.media_type))
 
-    # ProductionProvider allows at most two Reka attempts before falling through to Gemini exactly
-    # once (blindsight/providers.py). Whether an unfetchable media URL surfaces from Reka's real API
-    # as a transport/timeout exception (short-circuiting after one attempt) or as a normal-looking
-    # response that fails schema parsing (spending both attempts) is Reka's own behavior, not
-    # something this test controls -- so accept either shape rather than asserting exactly one.
-    reka_attempts, fallback = result.attempts[:-1], result.attempts[-1]
-    assert reka_attempts and all(attempt.provider == "reka" for attempt in reka_attempts)
-    assert 1 <= len(reka_attempts) <= 2
-    assert all(attempt.failure_kind is not None for attempt in reka_attempts)
-    assert fallback.provider == "gemini"
-    assert result.provider == "gemini"
-    assert result.card_body is not None, "the real Gemini fallback call did not return a validated card"
+    assert result.card_body is None
+    assert result.failure_kind in {"transport", "timeout"}
+    assert [attempt.provider for attempt in result.attempts] == ["reka"]
+    assert result.attempts[0].failure_kind in {"transport", "timeout"}

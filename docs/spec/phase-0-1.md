@@ -222,8 +222,10 @@ already spoke. Retained evidence is unaffected.
   model from configuration, defaulting to the stable `reka-flash` alias.
 - Make an assembled live clip or stored excerpt available to Reka through a short-lived,
   unguessable HTTPS media URL. The URL is an internal provider transport, not a public client route.
-- Put the complete scene-card schema in the prompt and begin the assistant response with `{`.
-  Validate the completed response with the sole scene-card validator.
+- Put the complete scene-card schema in the prompt, and additionally send it to Reka as an enforced
+  `response_format: {"type": "json_schema", ...}` (undocumented but supported; see Provider and
+  network facts). Send no assistant prefill: combining one with any `response_format` corrupts
+  Reka's output. Validate the completed response with the sole scene-card validator.
 - Allow two Reka parse attempts. After two malformed or schema-invalid results, invoke the Gemini
   fallback using its verified response-schema support.
 - Treat provider transport errors and timeouts separately from parse failures. Retry policy must be
@@ -246,10 +248,20 @@ already spoke. Retained evidence is unaffected.
 
 ## Provider and network facts
 
-- Reka’s stable Chat model alias is `reka-flash`; deployments may override it after listing models.
-- Reka Chat accepts short video by reachable `video_url` and is documented as best below 30 seconds.
-- Reka Chat does not document JSON Schema response enforcement. Prefix, parse, validate, retry, and
-  measured Gemini fallback are therefore required behavior.
+- Reka's documented stable Chat model alias is `reka-flash`, but as of 2026-08 that alias 404s
+  ("Unknown chat model"). Deployments must resolve a live model id from configuration after
+  listing `GET /v1/models`; the current deployment uses `reka-edge-2603` via Modal secrets.
+- Reka Chat accepts short video by reachable `video_url` and is documented as best below 30
+  seconds. The docs show `video_url` as a flat string, but the API requires the nested
+  `{"video_url": {"url": ...}}` dictionary form; a string input returns a 400 validation error.
+  On the live fleet only `reka-edge-2603`, `qwen3.8-flash`, and `qwen3.8-27b` accept video input;
+  `reka-flash-3` is text-only despite its name.
+- Reka Chat does not document JSON Schema response enforcement, but empirically accepts
+  `response_format: {"type": "json_schema", ...}` and honors it strictly (3/3 valid cards against
+  a public sample video, 2026-08-30). Under bare `json_object` mode the model echoes a schema
+  embedded in the prompt back instead of answering, and combining any `response_format` with an
+  assistant prefill corrupts the output. Prefix handling, parse, validate, retry, and the measured
+  Gemini fallback therefore remain required defense.
 - A live capture necessarily crosses the phone’s uplink once when chunks are sent to Modal.
   `video_url` prevents a second phone-to-provider transfer: after assembly, Reka fetches from
   Modal’s datacenter-facing URL. The preloaded excerpt path sends no video from the phone.

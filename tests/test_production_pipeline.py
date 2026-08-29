@@ -272,7 +272,10 @@ def test_reka_adapter_uses_documented_short_video_chat_shape() -> None:
         "type": "video_url",
         "video_url": {"url": "https://example.test/_provider-media/unguessable"},
     }
-    assert calls[0]["messages"][1] == {"role": "assistant", "content": "{"}
+    assert len(calls[0]["messages"]) == 1, "no assistant prefill is sent"
+    assert calls[0]["response_format"]["type"] == "json_schema"
+    assert calls[0]["response_format"]["json_schema"]["name"] == "SceneCardBody"
+    assert calls[0]["response_format"]["json_schema"]["strict"] is True
     assert result.usage["input_tokens"] == 20
 
 

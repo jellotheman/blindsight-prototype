@@ -205,10 +205,22 @@ class RekaChatAdapter:
                             {"type": "video_url", "video_url": {"url": evidence.media_url}},
                             {"type": "text", "text": prompt.removesuffix("{")},
                         ],
-                    },
-                    {"role": "assistant", "content": "{"},
+                    }
                 ],
                 temperature=0.2,
+                # Reka accepts full json_schema response_format even though its docs never
+                # mention it. json_object mode alone made the model echo the prompt's embedded
+                # schema back instead of answering; the enforced schema is what produces a
+                # valid SceneCardBody. The assistant-prefill variant was removed because it
+                # corrupts output when combined with any response_format.
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "SceneCardBody",
+                        "schema": SceneCardBody.model_json_schema(),
+                        "strict": True,
+                    },
+                },
             )
         except Exception as exc:
             kind: FailureKind = "timeout" if _is_timeout(exc) else "transport"
