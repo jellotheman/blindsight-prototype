@@ -21,6 +21,7 @@ class ExcerptEntry:
     label: str
     duration_seconds: float
     poster_path: Path
+    clip_path: Path
 
 
 class ExcerptCatalog:
@@ -44,6 +45,7 @@ class ExcerptCatalog:
                 label=item["label"],
                 duration_seconds=item["duration_seconds"],
                 poster_path=base_dir / item["poster_file"],
+                clip_path=base_dir / item["clip_file"],
             )
         self._entries = entries
 
@@ -63,3 +65,9 @@ class ExcerptCatalog:
         if entry is None:
             return None
         return entry.poster_path.read_bytes()
+
+    def evidence_bytes(self, excerpt_id: str) -> bytes | None:
+        entry = self._entries.get(excerpt_id)
+        if entry is None:
+            return None
+        return entry.clip_path.read_bytes()

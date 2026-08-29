@@ -28,6 +28,7 @@ api_key_secret = modal.Secret.from_name("blindsight-api-key")
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
+    .apt_install("ffmpeg")
     .pip_install("fastapi>=0.115", "pydantic>=2.7")
     .add_local_python_source("blindsight")
     .add_local_dir(str(ROOT / "data"), remote_path="/root/data")
@@ -35,6 +36,7 @@ image = (
 )
 
 app = modal.App("blindsight-api")
+capture_state = modal.Dict.from_name("blindsight-capture-state", create_if_missing=True)
 
 
 @app.function(image=image, secrets=[api_key_secret])
@@ -42,10 +44,12 @@ app = modal.App("blindsight-api")
 @modal.asgi_app()
 def web():
     from blindsight.app import create_app, mount_reference_client
+    from blindsight.storage import ModalCaptureStore
 
     fastapi_app = create_app(
         api_key=os.environ["BLINDSIGHT_API_KEY"],
         manifest_path=Path("/root/data/excerpts/manifest.json"),
+        store=ModalCaptureStore(capture_state),
     )
     mount_reference_client(fastapi_app, static_dir=Path("/root/static"))
     return fastapi_app
