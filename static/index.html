@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BlindSight reference client</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main>
+    <h1>BlindSight excerpt library</h1>
+    <p>
+      This reference client is an ordinary caller of the documented <code>/v1</code> HTTP
+      interface -- it holds no privileged access. Later tickets add the live capture flow and
+      spoken orientation; this walking skeleton shows the preloaded excerpts.
+    </p>
+    <section id="key-form">
+      <label for="api-key">Shared API key</label>
+      <input id="api-key" type="password" autocomplete="off" />
+      <button id="save-key">Save</button>
+    </section>
+    <ul id="excerpts"></ul>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

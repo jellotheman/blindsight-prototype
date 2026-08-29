@@ -15,3 +15,5 @@ artifacts/
 .modal/
 node_modules/
 dist/
+*.egg-info/
+build/
