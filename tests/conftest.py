@@ -36,10 +36,6 @@ class SchemaValidator:
         schema = {"$ref": f"{self._BASE_URI}#/components/schemas/{schema_name}"}
         self._assert_schema(schema, instance, schema_name)
 
-    def assert_schema(self, raw_schema: dict[str, Any], instance: Any, label: str) -> None:
-        """Validate against an arbitrary schema fragment taken directly from the OpenAPI document."""
-        self._assert_schema(raw_schema, instance, label)
-
     def assert_json_response(self, path: str, method: str, response: Any) -> None:
         """Validate status, media type, declared headers, and JSON body from OpenAPI."""
         operation = self._doc["paths"][path][method.lower()]

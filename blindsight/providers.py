@@ -116,10 +116,7 @@ class ProductionProvider:
                 if attempt.card_body is not None:
                     return _selected(attempt, attempts, prompt=prompt)
                 if attempt.failure_kind != "invalid_output":
-                    # A transport error or timeout means Reka never responded at all, so a
-                    # second identical call is unlikely to help. Don't spend it -- go straight
-                    # to Gemini instead of forfeiting the fallback for a recoverable capture.
-                    break
+                    return _failed(attempt, attempts, prompt=prompt)
         finally:
             self.media_urls.revoke(media_url)
 

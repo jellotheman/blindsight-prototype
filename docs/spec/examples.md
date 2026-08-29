@@ -184,17 +184,7 @@ curl --fail-with-body \
   -d '{"question":"What colour was the mug on the desk?"}'
 ```
 
-Poll the question URL:
-
-```bash
-QUESTION_ID="que_01J67K73MPCZG9HTV4A2F6Y1WR"
-
-curl --fail-with-body \
-  "$BLINDSIGHT_URL/v1/scene-sessions/$SESSION_ID/questions/$QUESTION_ID" \
-  -H "X-API-Key: $BLINDSIGHT_API_KEY"
-```
-
-If the card lacks the detail, the terminal card-first result is:
+Poll the question URL. If the card lacks the detail, the terminal card-first result is:
 
 ```json
 {
@@ -213,6 +203,8 @@ If the card lacks the detail, the terminal card-first result is:
 After the client asks the user and receives explicit consent:
 
 ```bash
+QUESTION_ID="que_01J67K73MPCZG9HTV4A2F6Y1WR"
+
 curl --fail-with-body \
   -X POST "$BLINDSIGHT_URL/v1/scene-sessions/$SESSION_ID/questions/$QUESTION_ID/clip-check" \
   -H "X-API-Key: $BLINDSIGHT_API_KEY"
