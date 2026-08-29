@@ -30,6 +30,35 @@ BlindSight is not a navigation or mobility aid and makes no safety claim.
 The contract is ready to drive implementation. The first implementation target is the Stage 0
 contract test suite described in the specification.
 
+## Run on Modal
+
+Modal authentication and application authentication are separate:
+
+- The Modal CLI uses the local Modal profile created by `modal token new`. GitHub Actions uses the
+  repository secrets `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` instead.
+- The BlindSight HTTP API uses the `BLINDSIGHT_API_KEY` value stored in the Modal secret named
+  `blindsight-api-key`. Enter that value in the reference client; it is sent as `X-API-Key` and
+  retained only in that browser's local storage.
+
+For a live-reloading development URL, run:
+
+```powershell
+python -m modal serve modal_app.py
+```
+
+The function declaration in `modal_app.py` attaches `blindsight-api-key`, so `serve` and `deploy`
+both receive `BLINDSIGHT_API_KEY` without placing it in source control or a local environment file.
+
+To update the persistent deployment manually, run:
+
+```powershell
+python -m modal deploy modal_app.py
+```
+
+Every push to `main` also runs the test suite and, if it passes, deploys the application through
+`.github/workflows/deploy-modal.yml`. The workflow requires the two Modal token repository secrets
+described above; the application API key remains in Modal and is not copied into GitHub.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
