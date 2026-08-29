@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
+from blindsight.excerpts import resolve_manifest_path
 from blindsight.identifiers import is_valid_identifier
 from tests.conftest import SchemaValidator, VERSIONED_GET_ROUTES
 
@@ -86,3 +89,23 @@ def test_non_versioned_routes_are_not_gated_by_the_api_key(client: TestClient) -
     # narrower claim directly: an unrelated unversioned path is never caught by the middleware.
     response = client.get("/healthz")
     assert response.status_code == 404  # unmatched route, not 401 -- middleware didn't intercept it
+
+
+def test_resolve_manifest_path_picks_the_first_present_candidate(tmp_path: Path) -> None:
+    bundled = tmp_path / "bundled" / "manifest.json"
+    volume = tmp_path / "volume" / "manifest.json"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text('{"items": []}', encoding="utf-8")
+
+    # Only the bundled fallback exists: it is selected even when listed second.
+    assert resolve_manifest_path([volume, bundled]) == bundled
+
+    # Once the volume manifest exists it wins because it is listed first.
+    volume.parent.mkdir(parents=True)
+    volume.write_text('{"items": []}', encoding="utf-8")
+    assert resolve_manifest_path([volume, bundled]) == volume
+
+
+def test_resolve_manifest_path_raises_when_no_candidate_exists(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        resolve_manifest_path([tmp_path / "missing1.json", tmp_path / "missing2.json"])

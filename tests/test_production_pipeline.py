@@ -270,7 +270,7 @@ def test_reka_adapter_uses_documented_short_video_chat_shape() -> None:
     assert calls[0]["model"] == "reka-flash"
     assert calls[0]["messages"][0]["content"][0] == {
         "type": "video_url",
-        "video_url": "https://example.test/_provider-media/unguessable",
+        "video_url": {"url": "https://example.test/_provider-media/unguessable"},
     }
     assert calls[0]["messages"][1] == {"role": "assistant", "content": "{"}
     assert result.usage["input_tokens"] == 20

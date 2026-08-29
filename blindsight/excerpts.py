@@ -1,18 +1,35 @@
 """The preloaded demonstration excerpt catalog.
 
-Backed by a manifest checked into the repository rather than a Modal volume: the library is
-small and static, so it ships inside the container image like any other bundled asset. Excerpt
-identifiers are contract identifiers (see `identifiers.py`), never the underlying poster
-filename or a volume path.
+In production the library lives on the ``blindsight-excerpts`` Modal Volume (the real 74-excerpt
+demonstration set); a small synthetic manifest bundled into the container image under
+``data/excerpts`` is the local-development fallback when the volume is absent. ``resolve_manifest_path``
+picks the first present manifest from an ordered list of candidates, so the two paths converge on
+the same catalog shape. Excerpt identifiers are contract identifiers (see ``identifiers.py``),
+never the underlying poster filename or a volume path.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from .identifiers import is_valid_identifier
+
+
+def resolve_manifest_path(candidates: Sequence[Path]) -> Path:
+    """Return the first manifest path in ``candidates`` that exists on disk.
+
+    Earlier candidates win, so callers should list the production volume manifest before any
+    bundled fallback. Raises ``FileNotFoundError`` if none are present.
+    """
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        f"no excerpt manifest found among: {[str(c) for c in candidates]}"
+    )
 
 
 @dataclass(frozen=True)

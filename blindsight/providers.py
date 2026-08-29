@@ -202,7 +202,7 @@ class RekaChatAdapter:
                     {
                         "role": "user",
                         "content": [
-                            {"type": "video_url", "video_url": evidence.media_url},
+                            {"type": "video_url", "video_url": {"url": evidence.media_url}},
                             {"type": "text", "text": prompt.removesuffix("{")},
                         ],
                     },
