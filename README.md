@@ -1,5 +1,9 @@
 # BlindSight Prototype
 
+[NOTE: INITIAL IMPLEMENTATION OF FIGMA PROTOTYPE IN REACT NATIVE, BY TEAM MEMBER AVIYANSH LOMEO]
+
+[https://github.com/aviyanshlomeo568-cpu/BlindSight]
+
 BlindSight is an environmental-understanding prototype for blind and low-vision people. A client
 records a short, user-directed captured view, the backend returns a structured scene card, and the
 client speaks a concise orientation before offering details on demand.
