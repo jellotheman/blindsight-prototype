@@ -26,6 +26,23 @@
 
     <p id="status" role="status" aria-live="polite"></p>
 
+    <section id="conversation" hidden>
+      <h2>Ask a follow-up question</h2>
+      <label for="question">Your question</label>
+      <input id="question" type="text" autocomplete="off" enterkeyhint="send" />
+      <button id="ask" type="button">Ask</button>
+
+      <p id="answer" role="status" aria-live="polite"></p>
+
+      <div id="consent" hidden>
+        <p id="consent-offer"></p>
+        <button id="consent-yes" type="button">Yes, check the captured view</button>
+        <button id="consent-no" type="button">No, never mind</button>
+      </div>
+
+      <button id="done" type="button">Done</button>
+    </section>
+
     <section id="excerpts-section">
       <h2>Or choose a demonstration excerpt</h2>
       <ul id="excerpts"></ul>

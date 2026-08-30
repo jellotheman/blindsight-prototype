@@ -87,6 +87,76 @@ body {
   text-align: center;
 }
 
+#conversation[hidden],
+#consent[hidden] {
+  display: none;
+}
+
+#conversation {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+#conversation h2 {
+  font-size: 1rem;
+  color: var(--muted);
+  font-weight: 500;
+  margin: 0;
+}
+
+#conversation label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+#question {
+  font-size: 1rem;
+  padding: 0.5rem;
+  width: 100%;
+}
+
+#ask,
+#consent button {
+  font-size: 1rem;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+#ask:disabled,
+#consent button:disabled,
+#done:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#consent {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+#answer {
+  margin: 0;
+  min-height: 1.5rem;
+}
+
+#done {
+  align-self: center;
+  margin-top: 0.5rem;
+  background: none;
+  border: 1px solid var(--muted);
+  border-radius: 0.5rem;
+  color: inherit;
+  padding: 0.5rem 1.5rem;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
 #excerpts-section h2 {
   font-size: 1rem;
   color: var(--muted);

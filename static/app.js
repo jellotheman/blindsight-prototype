@@ -12,6 +12,20 @@ const DEFAULT_POLL_MS = 1000;
 // processing_deadline_seconds) so a slow-but-successful response never races a spurious
 // client-side timeout right as the server is about to settle.
 const POLL_DEADLINE_MS = 105000;
+// Likewise longer than the backend's default question deadline (60s, see blindsight/app.py
+// question_processing_deadline_seconds).
+const QUESTION_POLL_DEADLINE_MS = 75000;
+
+const CAPTURE_SETTLED_STATUSES = ["succeeded", "failed"];
+const QUESTION_SETTLED_STATUSES = ["answered", "needs_clip_consent", "unanswerable", "failed"];
+
+// The card had no grounds for an answer. The offer is spoken before any captured-view check is
+// requested, and it warns about the extra wait the user is being asked to accept.
+const CONSENT_OFFER =
+  "I couldn't answer that from the scene card. Shall I check the captured view again? " +
+  "This may take several seconds.";
+// A second miss is a plain abstention. It is never turned into a confident negative claim.
+const ABSTENTION = "I couldn't tell from the capture.";
 
 const CANDIDATE_MIME_TYPES = [
   { recorder: "video/webm;codecs=vp9", contract: "video/webm" },
@@ -171,16 +185,18 @@ function retryAfterMs(response) {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : DEFAULT_POLL_MS;
 }
 
-async function pollUntilSettled(location) {
-  const deadline = Date.now() + POLL_DEADLINE_MS;
+// Captures and questions are the same asynchronous resource shape -- poll the Location URL,
+// respect Retry-After -- and differ only in which statuses count as settled.
+async function pollUntilSettled(location, settledStatuses, deadlineMs) {
+  const deadline = Date.now() + deadlineMs;
   for (;;) {
     const response = await api(location);
     const resource = await response.json();
-    if (resource.status === "succeeded" || resource.status === "failed") {
+    if (settledStatuses.includes(resource.status)) {
       return resource;
     }
     if (Date.now() > deadline) {
-      throw Object.assign(new Error("The capture did not settle in time."), {
+      throw Object.assign(new Error("The request did not settle in time."), {
         code: "CLIENT_POLL_TIMEOUT",
       });
     }
@@ -190,25 +206,31 @@ async function pollUntilSettled(location) {
 
 // Shared by live and excerpt sources once the capture resource exists and is being processed:
 // the wait ladder, settlement, and spoken success/failure flow are identical from here on.
-async function runToSettlement(location, statusEl) {
+async function runToSettlement(location, statusEl, sceneSessionId) {
   const ladder = startWaitLadder();
   try {
-    const settled = await pollUntilSettled(location);
+    const settled = await pollUntilSettled(location, CAPTURE_SETTLED_STATUSES, POLL_DEADLINE_MS);
     ladder.stop();
     if (settled.status === "succeeded") {
       const overview = settled.card.card.overview;
       statusEl.textContent = overview;
+      // The scene card is the grounding for every follow-up question until this session ends.
+      beginSceneSession(settled.scene_session_id);
       await say(overview);
       playSettledEarcon();
     } else {
       statusEl.textContent = settled.failure.message;
       playFailureBuzz();
+      // A capture that never produced a card leaves a scene session no one will ever ask about.
+      // The backend cannot infer that, so the client that opened it has to close it.
+      await deleteSceneSession(sceneSessionId);
     }
     return settled;
   } catch (err) {
     ladder.stop();
     statusEl.textContent = err.message;
     playFailureBuzz();
+    await deleteSceneSession(sceneSessionId);
     return null;
   }
 }
@@ -282,7 +304,7 @@ async function runLiveCapture(statusEl) {
     body: JSON.stringify({ chunk_count: nextIndex, mime_type: mime.contract }),
   });
 
-  return runToSettlement(location, statusEl);
+  return runToSettlement(location, statusEl, created.scene_session_id);
 }
 
 // --- Excerpt selection ------------------------------------------------------------------------
@@ -296,7 +318,11 @@ async function runExcerptCapture(excerptId, statusEl) {
       body: JSON.stringify({ source: { type: "excerpt", excerpt_id: excerptId } }),
     })
   ).json();
-  return runToSettlement(`/v1/captures/${created.capture_id}`, statusEl);
+  return runToSettlement(
+    `/v1/captures/${created.capture_id}`,
+    statusEl,
+    created.scene_session_id
+  );
 }
 
 async function renderExcerpts() {
@@ -329,6 +355,168 @@ async function renderExcerpts() {
   }
 }
 
+// --- Stage 1 scene session and follow-up questions ----------------------------------------------
+// A scene session is one scene card and the conversation grounded in it. "Done," a new capture, or
+// leaving the page ends it, and the client says so explicitly: the shared key carries no client
+// identity, so the backend cannot infer which earlier scene session a new capture supersedes.
+
+let activeSceneSessionId = null;
+// Set only while the backend has settled a question as needs_clip_consent and the user has been
+// asked. Nothing may reach the captured-view check without passing through this.
+let pendingConsent = null;
+
+function beginSceneSession(sceneSessionId) {
+  activeSceneSessionId = sceneSessionId;
+  hideConsentPrompt();
+  document.getElementById("answer").textContent = "";
+  document.getElementById("question").value = "";
+  document.getElementById("conversation").hidden = false;
+}
+
+async function deleteSceneSession(sceneSessionId) {
+  if (!sceneSessionId) return;
+  try {
+    await api(`/v1/scene-sessions/${sceneSessionId}`, { method: "DELETE" });
+  } catch {
+    // The session is over for this client either way, and a new capture must not be blocked by a
+    // failed teardown of the one it supersedes.
+  }
+}
+
+function closeConversationSurface() {
+  activeSceneSessionId = null;
+  hideConsentPrompt();
+  document.getElementById("conversation").hidden = true;
+  document.getElementById("answer").textContent = "";
+}
+
+async function endActiveSceneSession() {
+  const sceneSessionId = activeSceneSessionId;
+  closeConversationSurface();
+  await deleteSceneSession(sceneSessionId);
+}
+
+function showConsentPrompt(questionId, sceneSessionId) {
+  pendingConsent = { questionId, sceneSessionId };
+  document.getElementById("consent-offer").textContent = CONSENT_OFFER;
+  document.getElementById("consent").hidden = false;
+}
+
+function hideConsentPrompt() {
+  pendingConsent = null;
+  document.getElementById("consent").hidden = true;
+  document.getElementById("consent-offer").textContent = "";
+}
+
+// One place where a settled question becomes speech, shared by the card answer and the
+// captured-view answer. A miss is spoken as a miss; it never becomes a confident negative.
+async function speakQuestionOutcome(settled) {
+  const answerEl = document.getElementById("answer");
+  if (settled.status === "answered") {
+    answerEl.textContent = settled.answer;
+    await say(settled.answer);
+    playSettledEarcon();
+  } else if (settled.status === "needs_clip_consent") {
+    answerEl.textContent = "";
+    showConsentPrompt(settled.question_id, settled.scene_session_id);
+    await say(CONSENT_OFFER);
+  } else if (settled.status === "unanswerable") {
+    answerEl.textContent = ABSTENTION;
+    await say(ABSTENTION);
+  } else {
+    answerEl.textContent = settled.failure.message;
+    playFailureBuzz();
+  }
+}
+
+async function pollQuestionToSettlement(location) {
+  const ladder = startWaitLadder();
+  try {
+    return await pollUntilSettled(location, QUESTION_SETTLED_STATUSES, QUESTION_POLL_DEADLINE_MS);
+  } finally {
+    ladder.stop();
+  }
+}
+
+async function askQuestion(question) {
+  const sceneSessionId = activeSceneSessionId;
+  const created = await (
+    await api(`/v1/scene-sessions/${sceneSessionId}/questions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    })
+  ).json();
+  const location = `/v1/scene-sessions/${sceneSessionId}/questions/${created.question_id}`;
+  await speakQuestionOutcome(await pollQuestionToSettlement(location));
+}
+
+async function handleAsk() {
+  if (busy || !activeSceneSessionId) return;
+  const input = document.getElementById("question");
+  const question = input.value.trim();
+  if (!question) return;
+  unlockSpeech();
+  getAudioContext();
+  hideConsentPrompt();
+  setBusy(true);
+  const answerEl = document.getElementById("answer");
+  try {
+    input.value = "";
+    await askQuestion(question);
+  } catch (err) {
+    answerEl.textContent = err.message;
+    playFailureBuzz();
+  } finally {
+    setBusy(false);
+  }
+}
+
+// The only path to the captured-view check. Reaching it means the user heard the offer, including
+// its wait warning, and agreed.
+async function handleConsentAgreement() {
+  if (busy || !pendingConsent) return;
+  const { questionId, sceneSessionId } = pendingConsent;
+  unlockSpeech();
+  hideConsentPrompt();
+  setBusy(true);
+  const answerEl = document.getElementById("answer");
+  const location = `/v1/scene-sessions/${sceneSessionId}/questions/${questionId}`;
+  try {
+    await api(`${location}/clip-check`, { method: "POST" });
+    await speakQuestionOutcome(await pollQuestionToSettlement(location));
+  } catch (err) {
+    answerEl.textContent = err.message;
+    playFailureBuzz();
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function handleConsentRefusal() {
+  if (busy || !pendingConsent) return;
+  unlockSpeech();
+  hideConsentPrompt();
+  // Declining leaves the question unanswered. The acknowledgement confirms the control was heard
+  // without saying anything about the scene: that would be a claim the evidence was never
+  // checked for.
+  document.getElementById("answer").textContent = "";
+  await say("All right.");
+}
+
+async function handleDone() {
+  if (busy || !activeSceneSessionId) return;
+  unlockSpeech();
+  setBusy(true);
+  try {
+    await endActiveSceneSession();
+    // A control that ends the conversation has to be audible; the user cannot see it happen.
+    await say("Done.");
+  } finally {
+    setBusy(false);
+  }
+}
+
 // --- Orchestration --------------------------------------------------------------------------------
 
 let busy = false;
@@ -339,6 +527,9 @@ function setBusy(value) {
   for (const button of document.querySelectorAll("#excerpts button")) {
     button.disabled = value;
   }
+  for (const id of ["ask", "done", "question", "consent-yes", "consent-no"]) {
+    document.getElementById(id).disabled = value;
+  }
 }
 
 async function handleTap() {
@@ -348,6 +539,7 @@ async function handleTap() {
   setBusy(true);
   const statusEl = document.getElementById("status");
   try {
+    await endActiveSceneSession();
     await runLiveCapture(statusEl);
   } catch (err) {
     statusEl.textContent = err.message;
@@ -364,6 +556,7 @@ async function handleExcerptTap(excerptId) {
   setBusy(true);
   const statusEl = document.getElementById("status");
   try {
+    await endActiveSceneSession();
     await runExcerptCapture(excerptId, statusEl);
   } catch (err) {
     statusEl.textContent = err.message;
@@ -394,6 +587,35 @@ document.getElementById("save-key").addEventListener("click", () => {
 
 document.getElementById("change-key").addEventListener("click", showKeyGate);
 document.getElementById("tap-target").addEventListener("click", handleTap);
+
+document.getElementById("ask").addEventListener("click", handleAsk);
+document.getElementById("question").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") handleAsk();
+});
+document.getElementById("consent-yes").addEventListener("click", handleConsentAgreement);
+document.getElementById("consent-no").addEventListener("click", handleConsentRefusal);
+document.getElementById("done").addEventListener("click", handleDone);
+
+// Application shutdown ends the scene session too. keepalive lets the DELETE outlive the page.
+// event.persisted marks a page going into the back/forward cache rather than away: on a phone
+// that is an app switch, a screen lock or a call, and the user expects to come back to the same
+// conversation. Ending the session there would leave a live-looking panel whose controls no
+// longer do anything -- indistinguishable, with the screen off, from a broken app.
+window.addEventListener("pagehide", (event) => {
+  if (event.persisted || !activeSceneSessionId) return;
+  fetch(`/v1/scene-sessions/${activeSceneSessionId}`, {
+    method: "DELETE",
+    headers: { "X-API-Key": getApiKey() },
+    keepalive: true,
+  });
+  activeSceneSessionId = null;
+});
+
+// A restored page keeps the DOM it was frozen with, so a surface left open without a session
+// behind it has to be closed rather than silently swallowing taps.
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted && !activeSceneSessionId) closeConversationSurface();
+});
 
 if (getApiKey()) {
   showApp();
