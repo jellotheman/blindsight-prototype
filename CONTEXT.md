@@ -37,3 +37,18 @@ audible progress cues so it cannot be mistaken for a crash.
 
 **Attention budget:** The user's scarce auditory and cognitive capacity. Default speech is terse;
 detail is user-controlled.
+
+**World state:** The system's compressed understanding of what the camera sees at one moment. It is
+not a scene card and is never spoken. Avoid *embedding*, *features*, *latent*.
+
+**Transition:** A change of place large enough to justify a fresh understanding of the surroundings —
+crossing a threshold, leaving a building, a street opening onto a square. Movement inside one place
+is not a transition. Avoid *scene change*, *keyframe*, *event*.
+
+**Transition event:** The system's judgement that a transition occurred. It offers the user the
+chance to ask; it never starts a capture and never produces a description. Captures stay
+user-triggered.
+
+**Proactive descriptions:** An optional, off-by-default setting under which the system watches for
+transitions continuously. The name is the user-facing setting; what the setting actually delivers is
+an offer, not a description.
