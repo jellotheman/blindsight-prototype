@@ -10,8 +10,8 @@ from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
-from .prompt import build_scene_card_prompt
-from .scene_card import SceneCardBody
+from .prompt import build_captured_view_prompt, build_card_answer_prompt, build_scene_card_prompt
+from .scene_card import AnswerBody, SceneCardBody
 
 FailureKind = Literal["invalid_output", "transport", "timeout"]
 
@@ -54,6 +54,59 @@ class ProviderResult:
 
 class CaptureProvider(Protocol):
     def describe(self, evidence: CaptureEvidence) -> ProviderResult: ...
+
+
+@dataclass(frozen=True)
+class QuestionAnswer:
+    """The result of one Stage 1 card-grounded or captured-view answer attempt."""
+
+    answer: str | None
+    raw_text: str = ""
+    failure_kind: FailureKind | None = None
+    error: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+class CardAnswerProvider(Protocol):
+    """Answers a follow-up question from the scene card and conversation alone."""
+
+    def answer(
+        self, card_body: dict[str, Any], conversation: list[dict[str, Any]]
+    ) -> QuestionAnswer: ...
+
+
+class CapturedViewProvider(Protocol):
+    """Re-checks the stored captured view for a question the scene card could not answer."""
+
+    def answer(
+        self, evidence: CaptureEvidence, conversation: list[dict[str, Any]]
+    ) -> QuestionAnswer: ...
+
+
+class DeterministicCardAnswerProvider:
+    """A predictable card-answer double; returns the configured canned answer for every question."""
+
+    def __init__(self, *, answer: str | None = None) -> None:
+        self._answer = answer
+
+    def answer(
+        self, card_body: dict[str, Any], conversation: list[dict[str, Any]]
+    ) -> QuestionAnswer:
+        return QuestionAnswer(answer=self._answer, raw_text=json.dumps({"answer": self._answer}))
+
+
+class DeterministicCapturedViewProvider:
+    """A predictable captured-view double; returns the configured canned answer for every check."""
+
+    def __init__(self, *, answer: str | None = None) -> None:
+        self._answer = answer
+
+    def answer(
+        self, evidence: CaptureEvidence, conversation: list[dict[str, Any]]
+    ) -> QuestionAnswer:
+        return QuestionAnswer(answer=self._answer, raw_text=json.dumps({"answer": self._answer}))
 
 
 class AttemptProvider(Protocol):
@@ -165,6 +218,15 @@ class SingleProvider:
         )
 
 
+def _reka_client(*, api_key: str | None, timeout_seconds: float) -> Any:
+    key = api_key or os.environ.get("REKA_API_KEY")
+    if not key:
+        raise RuntimeError("REKA_API_KEY is required for the production provider.")
+    from openai import OpenAI
+
+    return OpenAI(base_url="https://api.reka.ai/v1", api_key=key, timeout=timeout_seconds)
+
+
 class RekaChatAdapter:
     name = "reka"
 
@@ -180,17 +242,7 @@ class RekaChatAdapter:
         self.timeout_seconds = timeout_seconds or float(
             os.environ.get("BLINDSIGHT_REKA_TIMEOUT_SECONDS", "40")
         )
-        if client is not None:
-            self.client = client
-            return
-        key = api_key or os.environ.get("REKA_API_KEY")
-        if not key:
-            raise RuntimeError("REKA_API_KEY is required for the production provider.")
-        from openai import OpenAI
-
-        self.client = OpenAI(
-            base_url="https://api.reka.ai/v1", api_key=key, timeout=self.timeout_seconds
-        )
+        self.client = client or _reka_client(api_key=api_key, timeout_seconds=self.timeout_seconds)
 
     def describe(self, evidence: CaptureEvidence, prompt: str, attempt: int) -> ProviderAttempt:
         if evidence.media_url is None:
@@ -334,6 +386,153 @@ class GeminiAdapter:
                 if value is not None:
                     usage[name] = value
         return _parse_attempt(self.name, self.model, attempt, raw_text, usage)
+
+
+class RekaCardAnswerAdapter:
+    """Stage 1 card-first answering, using the same Reka Chat endpoint as scene-card generation."""
+
+    name = "reka"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
+        client: Any | None = None,
+    ) -> None:
+        self.model = model or os.environ.get("BLINDSIGHT_REKA_MODEL", "reka-flash")
+        self.timeout_seconds = timeout_seconds or float(
+            os.environ.get("BLINDSIGHT_REKA_TIMEOUT_SECONDS", "40")
+        )
+        self.client = client or _reka_client(api_key=api_key, timeout_seconds=self.timeout_seconds)
+
+    def answer(
+        self, card_body: dict[str, Any], conversation: list[dict[str, Any]]
+    ) -> QuestionAnswer:
+        prompt = build_card_answer_prompt()
+        messages = [
+            {"role": "system", "content": prompt.removesuffix("{")},
+            {"role": "user", "content": f"Scene card:\n{json.dumps(card_body)}"},
+            *[{"role": turn["role"], "content": turn["content"]} for turn in conversation],
+        ]
+        return _call_reka_answer(self.client, self.name, self.model, self.timeout_seconds, messages)
+
+
+class RekaCapturedViewAdapter:
+    """Stage 1 consented captured-view re-check, invoked only from needs_clip_consent."""
+
+    name = "reka"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
+        client: Any | None = None,
+        media_urls: MediaPublisher | None = None,
+    ) -> None:
+        self.model = model or os.environ.get("BLINDSIGHT_REKA_MODEL", "reka-flash")
+        self.timeout_seconds = timeout_seconds or float(
+            os.environ.get("BLINDSIGHT_REKA_TIMEOUT_SECONDS", "40")
+        )
+        self.client = client or _reka_client(api_key=api_key, timeout_seconds=self.timeout_seconds)
+        self.media_urls = media_urls
+
+    def answer(
+        self, evidence: CaptureEvidence, conversation: list[dict[str, Any]]
+    ) -> QuestionAnswer:
+        if self.media_urls is None:
+            raise RuntimeError("Reka captured-view check requires a published provider-media URL.")
+        media_url = self.media_urls.publish(evidence)
+        try:
+            prompt = build_captured_view_prompt()
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": media_url}},
+                        {"type": "text", "text": prompt.removesuffix("{")},
+                    ],
+                },
+                *[{"role": turn["role"], "content": turn["content"]} for turn in conversation],
+            ]
+            return _call_reka_answer(
+                self.client, self.name, self.model, self.timeout_seconds, messages
+            )
+        finally:
+            self.media_urls.revoke(media_url)
+
+
+def _call_reka_answer(
+    client: Any,
+    provider: str,
+    model: str,
+    timeout_seconds: float,
+    messages: list[dict[str, Any]],
+) -> QuestionAnswer:
+    """The request/parse path shared by the card-answer and captured-view Reka adapters."""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "AnswerBody",
+                    "schema": AnswerBody.model_json_schema(),
+                    "strict": True,
+                },
+            },
+        )
+    except Exception as exc:
+        kind: FailureKind = "timeout" if _is_timeout(exc) else "transport"
+        return QuestionAnswer(
+            answer=None,
+            failure_kind=kind,
+            error=str(exc),
+            provider=provider,
+            model=model,
+            usage={"timeout_seconds": timeout_seconds},
+        )
+
+    content = response.choices[0].message.content or ""
+    raw_text = content.strip()
+    if not raw_text.startswith("{"):
+        raw_text = "{" + raw_text
+    usage = _native_usage(getattr(response, "usage", None))
+    usage["timeout_seconds"] = timeout_seconds
+    return _parse_answer(provider, model, raw_text, usage)
+
+
+def _parse_answer(
+    provider: str,
+    model: str,
+    raw_text: str,
+    usage: dict[str, Any],
+) -> QuestionAnswer:
+    try:
+        payload = json.loads(raw_text)
+        body = AnswerBody.model_validate(payload)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        return QuestionAnswer(
+            answer=None,
+            raw_text=raw_text,
+            failure_kind="invalid_output",
+            error=str(exc),
+            provider=provider,
+            model=model,
+            usage=usage,
+        )
+    return QuestionAnswer(
+        answer=body.answer,
+        raw_text=raw_text,
+        provider=provider,
+        model=model,
+        usage=usage,
+    )
 
 
 def _parse_attempt(

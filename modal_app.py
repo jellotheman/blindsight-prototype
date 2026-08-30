@@ -70,7 +70,13 @@ def web():
     from blindsight.evidence import FileEvidenceStore
     from blindsight.excerpts import resolve_manifest_path
     from blindsight.media_urls import ModalMediaUrlStore
-    from blindsight.providers import GeminiAdapter, ProductionProvider, RekaChatAdapter
+    from blindsight.providers import (
+        GeminiAdapter,
+        ProductionProvider,
+        RekaCapturedViewAdapter,
+        RekaCardAnswerAdapter,
+        RekaChatAdapter,
+    )
     from blindsight.storage import ModalCaptureStore
 
     public_base_url = os.environ.get("BLINDSIGHT_PUBLIC_BASE_URL") or web.get_web_url()
@@ -98,6 +104,11 @@ def web():
         evidence_store=FileEvidenceStore(Path("/evidence/runs"), flush=evidence_volume.commit),
         processing_deadline_seconds=float(
             os.environ.get("BLINDSIGHT_PROCESSING_DEADLINE_SECONDS", "90")
+        ),
+        card_provider=RekaCardAnswerAdapter(),
+        captured_view_provider=RekaCapturedViewAdapter(media_urls=media_urls),
+        question_processing_deadline_seconds=float(
+            os.environ.get("BLINDSIGHT_QUESTION_PROCESSING_DEADLINE_SECONDS", "60")
         ),
     )
     mount_reference_client(fastapi_app, static_dir=Path("/root/static"))

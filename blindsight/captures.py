@@ -5,12 +5,12 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import replace
-from queue import Empty, Queue
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from pydantic import ValidationError
 
+from .concurrency import run_with_deadline
 from .errors import ApiError, NotFound
 from .evidence import EvidenceStore, NullEvidenceStore, RunClock
 from .excerpts import ExcerptCatalog
@@ -310,6 +310,7 @@ class CaptureService:
                 evidence=[resource["capture_id"]],
                 card=body,
             ).model_dump(mode="json")
+            self.store.put_media(capture_id, evidence.content, evidence.media_type)
         resource["updated_at"] = _now()
         clock.mark("completed_ms")
         if not self._finish_evidence(
@@ -326,20 +327,7 @@ class CaptureService:
     def _describe_with_deadline(
         self, evidence: CaptureEvidence, timeout_seconds: float
     ) -> tuple[str, Any]:
-        results: Queue[tuple[str, Any]] = Queue(maxsize=1)
-
-        def invoke() -> None:
-            try:
-                results.put(("result", self.provider.describe(evidence)))
-            except Exception as exc:
-                results.put(("error", exc))
-
-        worker = threading.Thread(target=invoke, daemon=True)
-        worker.start()
-        try:
-            return results.get(timeout=timeout_seconds)
-        except Empty:
-            return ("timeout", None)
+        return run_with_deadline(lambda: self.provider.describe(evidence), timeout_seconds)
 
     def _settle_internal_error(
         self, resource: dict[str, Any], *, clock: RunClock | None = None

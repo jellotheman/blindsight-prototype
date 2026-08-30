@@ -66,3 +66,7 @@ class SceneCard(ContractModel):
     revision: int = Field(ge=1)
     evidence: list[str] = Field(min_length=1)
     card: SceneCardBody
+
+
+class AnswerBody(ContractModel):
+    answer: str | None = Field(min_length=1)

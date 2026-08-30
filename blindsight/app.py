@@ -1,7 +1,7 @@
 """The BlindSight HTTP interface, documented in full by docs/spec/openapi.yaml.
 
-This module wires authentication and error mapping around the excerpt catalog and Stage 0 capture
-resource. Later tickets add production providers and Stage 1 questions to the same application.
+This module wires authentication and error mapping around the excerpt catalog, the Stage 0
+capture resource, and the Stage 1 scene-session question resource.
 """
 
 from __future__ import annotations
@@ -21,7 +21,15 @@ from .evidence import EvidenceStore
 from .excerpts import ExcerptCatalog
 from .media import FfprobeMediaValidator, MediaValidator
 from .media_urls import ProviderMediaUrls
-from .providers import CaptureProvider, DeterministicProvider
+from .providers import (
+    CapturedViewProvider,
+    CardAnswerProvider,
+    CaptureProvider,
+    DeterministicCapturedViewProvider,
+    DeterministicCardAnswerProvider,
+    DeterministicProvider,
+)
+from .questions import QuestionService
 from .storage import CaptureStore, MemoryCaptureStore
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "data" / "excerpts" / "manifest.json"
@@ -66,10 +74,14 @@ def create_app(
     evidence_store: EvidenceStore | None = None,
     media_urls: ProviderMediaUrls | None = None,
     processing_deadline_seconds: float = 90.0,
+    card_provider: CardAnswerProvider | None = None,
+    captured_view_provider: CapturedViewProvider | None = None,
+    question_processing_deadline_seconds: float = 60.0,
 ) -> FastAPI:
     catalog = ExcerptCatalog(manifest_path)
+    resolved_store = store or MemoryCaptureStore()
     capture_service = CaptureService(
-        store=store or MemoryCaptureStore(),
+        store=resolved_store,
         provider=provider or DeterministicProvider(card_body=DEFAULT_CARD),
         catalog=catalog,
         media_validator=media_validator or FfprobeMediaValidator(),
@@ -77,6 +89,13 @@ def create_app(
         max_capture_bytes=max_capture_bytes,
         evidence_store=evidence_store,
         processing_deadline_seconds=processing_deadline_seconds,
+    )
+    question_service = QuestionService(
+        store=resolved_store,
+        card_provider=card_provider or DeterministicCardAnswerProvider(answer=None),
+        captured_view_provider=captured_view_provider
+        or DeterministicCapturedViewProvider(answer=None),
+        processing_deadline_seconds=question_processing_deadline_seconds,
     )
 
     app = FastAPI(title="BlindSight Stage 0/1 API")
@@ -190,6 +209,51 @@ def create_app(
             content=resource,
             headers={"Location": location, "Retry-After": "1"},
         )
+
+    @app.post("/v1/scene-sessions/{scene_session_id}/questions", status_code=202)
+    async def create_question(scene_session_id: str, request: Request) -> JSONResponse:
+        body = await _read_json(request)
+        if not isinstance(body, dict) or set(body) != {"question"}:
+            raise ApiError(400, "INVALID_REQUEST", "A question is required.")
+        question = body.get("question")
+        if not isinstance(question, str) or not 1 <= len(question) <= 1000:
+            raise ApiError(
+                400, "INVALID_REQUEST", "question must be a string of 1 to 1000 characters."
+            )
+        resource = question_service.create_question(scene_session_id, question)
+        location = f"/v1/scene-sessions/{scene_session_id}/questions/{resource['question_id']}"
+        return JSONResponse(
+            status_code=202,
+            content=resource,
+            headers={"Location": location, "Retry-After": "1"},
+        )
+
+    @app.get("/v1/scene-sessions/{scene_session_id}/questions/{question_id}")
+    def get_question(scene_session_id: str, question_id: str) -> JSONResponse:
+        resource = question_service.get(scene_session_id, question_id)
+        if resource is None:
+            raise NotFound(f"No question with id {question_id!r}.")
+        headers = {"Retry-After": "1"} if resource["status"] == "processing" else {}
+        return JSONResponse(content=resource, headers=headers)
+
+    @app.post(
+        "/v1/scene-sessions/{scene_session_id}/questions/{question_id}/clip-check",
+        status_code=202,
+    )
+    def check_captured_view(scene_session_id: str, question_id: str) -> JSONResponse:
+        resource = question_service.clip_check(scene_session_id, question_id)
+        location = f"/v1/scene-sessions/{scene_session_id}/questions/{question_id}"
+        return JSONResponse(
+            status_code=202,
+            content=resource,
+            headers={"Location": location, "Retry-After": "1"},
+        )
+
+    @app.delete("/v1/scene-sessions/{scene_session_id}", status_code=204)
+    def delete_scene_session(scene_session_id: str) -> Response:
+        if not question_service.delete_session(scene_session_id):
+            raise NotFound(f"No scene session with id {scene_session_id!r}.")
+        return Response(status_code=204)
 
     return app
 
