@@ -43,6 +43,22 @@ contract test suite described in the specification.
 
 ## Run locally, reachable from a phone
 
+The two normal startup paths are:
+
+```powershell
+.\start-web.ps1          # exported web app, available only on this computer
+.\start-web.ps1 -Phone   # exported web app in a phone browser
+.\start-expo.ps1         # native app through Expo Go or a development build
+```
+
+Both scripts prepare a lightweight local Python environment and install dependencies when needed.
+They generate temporary API keys at runtime; no key or environment configuration is stored in
+either script. `start-expo.ps1` opens the API in a second terminal and starts Expo in the first.
+Enter the API terminal's HTTPS URL and temporary key in BlindSight's Settings screen. Phone modes
+require `cloudflared` on `PATH`; Expo's tunnel may also install or request its tunnel helper.
+
+The manual setup is available when you need finer control:
+
 Install and export the Expo web client before starting the Python server:
 
 ```powershell

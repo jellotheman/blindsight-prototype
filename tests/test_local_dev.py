@@ -99,13 +99,17 @@ def test_wait_for_tunnel_url_treats_process_exit_sentinel_as_a_failure() -> None
         wait_for_tunnel_url(lines, timeout_seconds=1.0)
 
 
-def test_build_app_serves_the_reference_client_and_the_authenticated_v1_interface() -> None:
+def test_build_app_serves_the_expo_client_and_the_authenticated_v1_interface() -> None:
     app = build_app(api_key="local-dev-key-0123456789")
     client = TestClient(app)
 
     page = client.get("/")
     assert page.status_code == 200
-    assert b"Tap the center of the screen to record." in page.content
+    assert b"/_expo/static/js/web/entry-" in page.content
+
+    reference = client.get("/reference/")
+    assert reference.status_code == 200
+    assert b"Tap the center of the screen to record." in reference.content
 
     unauthenticated = client.get("/v1/excerpts")
     assert unauthenticated.status_code == 401

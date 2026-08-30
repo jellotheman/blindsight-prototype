@@ -14,8 +14,10 @@ provider wiring belongs to the deployed Modal application, not this tool.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -150,33 +152,69 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--api-key",
         default=os.environ.get("BLINDSIGHT_API_KEY"),
-        help="Shared key the local server requires. Defaults to $BLINDSIGHT_API_KEY.",
+        help="Shared key the local server requires. Prompts when omitted.",
+    )
+    parser.add_argument(
+        "--generate-api-key",
+        action="store_true",
+        help="Generate and print a temporary key instead of prompting for one.",
+    )
+    parser.add_argument(
+        "--no-tunnel",
+        action="store_true",
+        help="Serve only on this computer instead of opening a Cloudflare quick tunnel.",
     )
     parser.add_argument("--tunnel-timeout-seconds", type=float, default=DEFAULT_TUNNEL_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
 
-    if not args.api_key:
-        print(
-            "An API key is required: pass --api-key or set BLINDSIGHT_API_KEY.",
-            file=sys.stderr,
-        )
-        return 1
+    generated_api_key = False
+    if args.generate_api_key:
+        args.api_key = secrets.token_urlsafe(24)
+        generated_api_key = True
+    elif not args.api_key:
+        try:
+            args.api_key = getpass.getpass(
+                "Choose a temporary API key (enter the same key in BlindSight Settings): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("An API key is required.", file=sys.stderr)
+            return 1
+        if not args.api_key:
+            print("An API key is required.", file=sys.stderr)
+            return 1
 
     try:
-        cloudflared_path = require_tool(
-            "cloudflared",
-            hint=(
-                "Install it from https://developers.cloudflare.com/cloudflared/downloads/ "
-                "(or `winget install cloudflare.cloudflared`), then try again."
-            ),
-        )
         require_free_port(args.host, args.port)
+        cloudflared_path = None
+        if not args.no_tunnel:
+            cloudflared_path = require_tool(
+                "cloudflared",
+                hint=(
+                    "Install it from https://developers.cloudflare.com/cloudflared/downloads/ "
+                    "(or `winget install cloudflare.cloudflared`), then try again."
+                ),
+            )
     except LauncherError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
     app = build_app(api_key=args.api_key)
     server, server_thread = _run_server(app, args.host, args.port)
+    if args.no_tunnel:
+        print(f"BlindSight is available on this computer at: http://{args.host}:{args.port}")
+        if generated_api_key:
+            print(f"Temporary API key for BlindSight Settings: {args.api_key}")
+        print("Press Ctrl+C to stop the server.")
+        try:
+            while server_thread.is_alive():
+                server_thread.join(timeout=0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.should_exit = True  # type: ignore[attr-defined]
+        return 0
+
+    assert cloudflared_path is not None
     tunnel_process, tunnel_lines = _start_cloudflared(cloudflared_path, args.port)
 
     try:
@@ -187,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"BlindSight is reachable from a phone at: {tunnel_url}")
+    if generated_api_key:
+        print(f"Temporary API key for BlindSight Settings: {args.api_key}")
     print(f"Local server: http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop both the server and the tunnel.")
 
