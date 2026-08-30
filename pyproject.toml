@@ -24,6 +24,12 @@ dev = [
     "modal>=1.0",
     "mypy>=1.11",
     "uvicorn>=0.30",
+    "numpy>=1.26",
+    "torch>=2.9",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
 ]
 
 [tool.pytest.ini_options]
