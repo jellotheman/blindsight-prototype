@@ -16,8 +16,11 @@ try {
         py -3.12 -m venv .venv
     }
 
+    $ErrorActionPreference = 'Continue'
     & $venvPython -c 'import fastapi, uvicorn, blindsight' 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $dependencyProbeExitCode = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    if ($dependencyProbeExitCode -ne 0) {
         Write-Host 'Installing the local server dependencies...'
         & $venvPython -m pip install -e . 'uvicorn>=0.30'
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
