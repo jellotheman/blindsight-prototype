@@ -34,6 +34,10 @@ const CANDIDATE_MIME_TYPES = [
   { recorder: "video/mp4", contract: "video/mp4" },
 ];
 
+// Live target bitrate for the recorder. The provider accepts ~750 kbps excerpts, and live WebM
+// at the recorder default produced 3.4-8.7 MB per 8-second clip.
+const LIVE_VIDEO_BITS_PER_SECOND = 1_000_000;
+
 function getApiKey() {
   return window.localStorage.getItem(KEY_STORAGE) || "";
 }
@@ -267,12 +271,25 @@ async function runLiveCapture(statusEl) {
   statusEl.textContent = "Look around at what you'd like described.";
   await say("Look around at what you'd like described.");
 
-  const recorder = new MediaRecorder(stream, { mimeType: mime.recorder });
+  const recorder = new MediaRecorder(stream, {
+    mimeType: mime.recorder,
+    videoBitsPerSecond: LIVE_VIDEO_BITS_PER_SECOND,
+  });
   const uploads = [];
   let nextIndex = 0;
+  // MediaRecorder's streaming WebM carries no Duration element in the Segment Info, and the
+  // provider rejects such files. The Info lives in chunk 0, so chunk 0 is held back here and
+  // patched with the measured wall-clock duration once recording ends, then uploaded like any
+  // other chunk (the patch is a header rewrite; chunks 1+ upload concurrently as before). If
+  // patching fails, the unpatched chunk 0 is uploaded as-is -- backend validation still guards.
+  let chunk0 = null;
   recorder.ondataavailable = (event) => {
     if (event.data.size === 0) return;
     const index = nextIndex++;
+    if (index === 0) {
+      chunk0 = event.data;
+      return;
+    }
     uploads.push(
       api(`/v1/captures/${created.capture_id}/chunks/${index}`, {
         method: "PUT",
@@ -285,6 +302,7 @@ async function runLiveCapture(statusEl) {
   const stopped = new Promise((resolve) => {
     recorder.onstop = resolve;
   });
+  const captureStartedAt = performance.now();
   recorder.start(CHUNK_TIMESLICE_MS);
   statusEl.textContent = "Recording...";
   const metronome = setInterval(playMetronomeTick, 1000);
@@ -295,7 +313,25 @@ async function runLiveCapture(statusEl) {
   recorder.stop();
   playCapturedEarcon();
   await stopped;
+  const captureDurationMs = performance.now() - captureStartedAt;
 
+  if (chunk0) {
+    let uploadBlob = chunk0;
+    if (mime.contract === "video/webm" && window.fixWebmDurationLib) {
+      try {
+        uploadBlob = await window.fixWebmDurationLib.fixWebmDuration(chunk0, captureDurationMs);
+      } catch {
+        // Keep the unpatched chunk 0; the provider rejection is handled downstream.
+      }
+    }
+    uploads.push(
+      api(`/v1/captures/${created.capture_id}/chunks/0`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: uploadBlob,
+      })
+    );
+  }
   await Promise.all(uploads);
   statusEl.textContent = "Processing...";
   await api(`/v1/captures/${created.capture_id}/complete`, {
