@@ -32,6 +32,13 @@ from .providers import (
 from .questions import QuestionService
 from .remux import FfmpegChunkRemuxer, MediaRemuxer
 from .storage import CaptureStore, MemoryCaptureStore
+from .transitions import (
+    InMemoryTransitionAdapter,
+    MemoryTransitionSessionStore,
+    TransitionAdapter,
+    TransitionService,
+    TransitionSessionStore,
+)
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "data" / "excerpts" / "manifest.json"
 
@@ -79,6 +86,11 @@ def create_app(
     card_provider: CardAnswerProvider | None = None,
     captured_view_provider: CapturedViewProvider | None = None,
     question_processing_deadline_seconds: float = 60.0,
+    transition_store: TransitionSessionStore | None = None,
+    transition_adapter: TransitionAdapter | None = None,
+    max_transition_chunk_bytes: int = 10 * 1024 * 1024,
+    max_transition_queued_bytes: int = 100 * 1024 * 1024,
+    transition_processing_deadline_seconds: float = 30.0,
 ) -> FastAPI:
     catalog = ExcerptCatalog(manifest_path)
     resolved_store = store or MemoryCaptureStore()
@@ -99,6 +111,13 @@ def create_app(
         captured_view_provider=captured_view_provider
         or DeterministicCapturedViewProvider(answer=None),
         processing_deadline_seconds=question_processing_deadline_seconds,
+    )
+    transition_service = TransitionService(
+        store=transition_store or MemoryTransitionSessionStore(),
+        adapter=transition_adapter or InMemoryTransitionAdapter(),
+        max_chunk_bytes=max_transition_chunk_bytes,
+        max_queued_bytes=max_transition_queued_bytes,
+        processing_deadline_seconds=transition_processing_deadline_seconds,
     )
 
     app = FastAPI(title="BlindSight Stage 0/1 API")
@@ -256,6 +275,38 @@ def create_app(
     def delete_scene_session(scene_session_id: str) -> Response:
         if not question_service.delete_session(scene_session_id):
             raise NotFound(f"No scene session with id {scene_session_id!r}.")
+        return Response(status_code=204)
+
+    @app.post("/v1/transition-sessions", status_code=201)
+    def create_transition_session() -> JSONResponse:
+        resource = transition_service.create()
+        location = f"/v1/transition-sessions/{resource['transition_session_id']}"
+        return JSONResponse(status_code=201, content=resource, headers={"Location": location})
+
+    @app.put("/v1/transition-sessions/{transition_session_id}/chunks/{index}")
+    async def put_transition_chunk(
+        transition_session_id: str, index: int, request: Request
+    ) -> dict:
+        media_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if media_type not in {"video/webm", "video/mp4", "video/quicktime"}:
+            raise ApiError(
+                415,
+                "UNSUPPORTED_MEDIA_TYPE",
+                "Transition chunks require video/webm, video/mp4, or video/quicktime.",
+            )
+        return transition_service.put_chunk(
+            transition_session_id, index, await request.body(), media_type
+        )
+
+    @app.get("/v1/transition-sessions/{transition_session_id}")
+    def get_transition_session(
+        transition_session_id: str, cursor: str | None = None
+    ) -> dict:
+        return transition_service.get(transition_session_id, cursor)
+
+    @app.delete("/v1/transition-sessions/{transition_session_id}", status_code=204)
+    def delete_transition_session(transition_session_id: str) -> Response:
+        transition_service.delete(transition_session_id)
         return Response(status_code=204)
 
     return app

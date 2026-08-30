@@ -16,6 +16,7 @@ tags:
   - name: Excerpts
   - name: Captures
   - name: Questions
+  - name: Transitions
 paths:
   /v1/excerpts:
     get:
@@ -361,6 +362,122 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/transition-sessions:
+    post:
+      tags: [Transitions]
+      operationId: createTransitionSession
+      summary: Create and enable one continuous transition session
+      description: >-
+        Continuous transition processing is off until this authenticated operation creates a
+        session. A session reports only transition offers; it never creates a capture or a scene card.
+      responses:
+        "201":
+          description: Transition session created
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransitionSessionResource"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/transition-sessions/{transition_session_id}/chunks/{index}:
+    parameters:
+      - $ref: "#/components/parameters/TransitionSessionId"
+      - $ref: "#/components/parameters/TransitionChunkIndex"
+    put:
+      tags: [Transitions]
+      operationId: putTransitionChunk
+      summary: Add one numbered continuous-media chunk
+      description: >-
+        Chunks can arrive out of order. Only the contiguous prefix is processed. The Content-Type
+        header declares the media type. Repeating identical bytes at an index is idempotent.
+      requestBody:
+        required: true
+        content:
+          video/webm:
+            schema:
+              type: string
+              format: binary
+          video/mp4:
+            schema:
+              type: string
+              format: binary
+          video/quicktime:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Chunk stored or accepted idempotently
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransitionChunkReceipt"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TransitionQueueTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/transition-sessions/{transition_session_id}:
+    parameters:
+      - $ref: "#/components/parameters/TransitionSessionId"
+    get:
+      tags: [Transitions]
+      operationId: getTransitionSession
+      summary: Read transition-session state and retained transition events
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Return only events after this retained transition-event identifier. Reusing a cursor
+            returns the same ordered events until newer events are retained.
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/Identifier"
+              - type: "null"
+      responses:
+        "200":
+          description: Current transition-session resource
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransitionSessionResource"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      tags: [Transitions]
+      operationId: deleteTransitionSession
+      summary: Stop a transition session and release avoidable work
+      responses:
+        "204":
+          description: Stop request accepted; later media ingestion is rejected.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     ApiKey:
@@ -393,6 +510,20 @@ components:
       required: true
       schema:
         $ref: "#/components/schemas/Identifier"
+    TransitionSessionId:
+      name: transition_session_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Identifier"
+    TransitionChunkIndex:
+      name: index
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 999999
   responses:
     BadRequest:
       description: Malformed or semantically invalid request
@@ -471,6 +602,18 @@ components:
             error:
               code: CAPTURE_TOO_LARGE
               message: The capture exceeds the configured byte limit.
+              retryable: false
+              details: {}
+    TransitionQueueTooLarge:
+      description: A transition-media chunk or queued continuous prefix exceeds its byte limit
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            error:
+              code: TRANSITION_QUEUE_TOO_LARGE
+              message: The queued transition media exceeds the byte limit.
               retryable: false
               details: {}
     UnsupportedMedia:
@@ -823,6 +966,85 @@ components:
         failure:
           oneOf:
             - $ref: "#/components/schemas/AsyncFailure"
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TransitionStatus:
+      type: string
+      enum: [starting, active, failed]
+    TransitionFailureCode:
+      type: string
+      enum: [TRANSITION_ADAPTER_FAILED, INTERNAL_ERROR]
+    TransitionFailure:
+      type: object
+      additionalProperties: false
+      required: [code, message, retryable]
+      properties:
+        code:
+          $ref: "#/components/schemas/TransitionFailureCode"
+        message:
+          type: string
+          minLength: 1
+        retryable:
+          type: boolean
+    TransitionEvent:
+      type: object
+      additionalProperties: false
+      required: [transition_event_id, observed_at]
+      properties:
+        transition_event_id:
+          $ref: "#/components/schemas/Identifier"
+        observed_at:
+          type: string
+          format: date-time
+          description: Time at which the causal detector observed the transition.
+    TransitionChunkReceipt:
+      type: object
+      additionalProperties: false
+      required: [transition_session_id, index, bytes, idempotent]
+      properties:
+        transition_session_id:
+          $ref: "#/components/schemas/Identifier"
+        index:
+          type: integer
+          minimum: 0
+        bytes:
+          type: integer
+          minimum: 1
+        idempotent:
+          type: boolean
+    TransitionSessionResource:
+      type: object
+      additionalProperties: false
+      required:
+        - transition_session_id
+        - status
+        - events
+        - next_event_cursor
+        - failure
+        - created_at
+        - updated_at
+      properties:
+        transition_session_id:
+          $ref: "#/components/schemas/Identifier"
+        status:
+          $ref: "#/components/schemas/TransitionStatus"
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/TransitionEvent"
+        next_event_cursor:
+          oneOf:
+            - $ref: "#/components/schemas/Identifier"
+            - type: "null"
+          description: Cursor for the last event in this response, or the supplied cursor when none follow.
+        failure:
+          oneOf:
+            - $ref: "#/components/schemas/TransitionFailure"
             - type: "null"
         created_at:
           type: string

@@ -31,6 +31,8 @@ from pathlib import Path
 
 import modal
 
+from blindsight.transitions import TransitionObservation
+
 ROOT = Path(__file__).resolve().parent
 
 api_key_secret = modal.Secret.from_name("blindsight-api-key")
@@ -57,6 +59,41 @@ evidence_volume = modal.Volume.from_name("blindsight-evidence", create_if_missin
 excerpts_volume = modal.Volume.from_name("blindsight-excerpts", create_if_missing=True)
 
 
+@app.function(image=image, timeout=30)
+def transition_worker(
+    operation: str,
+    transition_session_id: str,
+    index: int | None = None,
+    content: bytes | None = None,
+    media_type: str | None = None,
+) -> list[dict[str, str]]:
+    """Stage 3 production-worker seam.
+
+    Inference arrives in later Stage 3 tickets. This deployed worker deliberately returns no
+    events now, while making the streaming boundary and its Modal lifecycle real.
+    """
+    del operation, transition_session_id, index, content, media_type
+    return []
+
+
+class _ModalFunctionTransitionWorker:
+    """Adapt a pre-declared Modal Function to the transition module's small worker protocol."""
+
+    def start(self, transition_session_id: str) -> None:
+        transition_worker.remote("start", transition_session_id)
+
+    def process(
+        self, transition_session_id: str, index: int, content: bytes, media_type: str
+    ) -> list[TransitionObservation]:
+        values = transition_worker.remote(
+            "process", transition_session_id, index, content, media_type
+        )
+        return [TransitionObservation(**value) for value in values]
+
+    def stop(self, transition_session_id: str) -> None:
+        transition_worker.remote("stop", transition_session_id)
+
+
 @app.function(
     image=image,
     secrets=[api_key_secret, provider_secret, gemini_secret],
@@ -78,6 +115,7 @@ def web():
         RekaChatAdapter,
     )
     from blindsight.storage import ModalCaptureStore
+    from blindsight.transitions import ModalTransitionAdapter, ModalTransitionSessionStore
 
     public_base_url = os.environ.get("BLINDSIGHT_PUBLIC_BASE_URL") or web.get_web_url()
     if not public_base_url:
@@ -109,6 +147,11 @@ def web():
         captured_view_provider=RekaCapturedViewAdapter(media_urls=media_urls),
         question_processing_deadline_seconds=float(
             os.environ.get("BLINDSIGHT_QUESTION_PROCESSING_DEADLINE_SECONDS", "60")
+        ),
+        transition_store=ModalTransitionSessionStore(capture_state),
+        transition_adapter=ModalTransitionAdapter(_ModalFunctionTransitionWorker()),
+        transition_processing_deadline_seconds=float(
+            os.environ.get("BLINDSIGHT_TRANSITION_PROCESSING_DEADLINE_SECONDS", "30")
         ),
     )
     mount_reference_client(fastapi_app, static_dir=Path("/root/static"))
