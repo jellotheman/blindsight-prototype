@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import re
@@ -382,6 +383,53 @@ def enforce_cost_budget(
             f"Estimated {estimate.estimated_retained_bytes} retained bytes exceeds the accepted "
             f"budget of {max_retained_bytes}. Approve a new plan before running this extraction."
         )
+
+
+# --------------------------------------------------------------------------------------------
+# Run record assembly (wall-clock measurement around the actual fan-out, not the planning)
+# --------------------------------------------------------------------------------------------
+
+
+def assemble_run_record(
+    *,
+    manifest_name: str,
+    corpus: CorpusName,
+    window_config: WindowConfigName,
+    estimate: ExtractionCostEstimate,
+    batch_count: int,
+    clip_count: int,
+    fan_out: Callable[[], Sequence[Mapping[str, object]]],
+) -> dict[str, object]:
+    """Run the batch fan-out under a monotonic wall clock and assemble the run record.
+
+    ``fan_out`` performs the actual encoding work (in production, ``encode_clip_batch.starmap``);
+    planning has already happened by the time this is called. The measured ``wall_seconds`` covers
+    only the fan-out and its results, never the planning. The ``estimated_gpu_seconds`` and
+    ``estimated_retained_bytes`` fields keep their plan-time values unchanged. The record keeps the
+    failed items even when the fan-out partially fails, so a failed run still reports its wall time.
+    """
+
+    start = time.monotonic()
+    batch_results = list(fan_out())
+    wall_seconds = time.monotonic() - start
+    failed = [
+        {"clip_id": result["clip_id"], "error": result["error"]}
+        for batch in batch_results
+        for result in batch["results"]  # type: ignore[index]
+        if result["status"] == "failed"
+    ]
+    return {
+        "manifest_name": manifest_name,
+        "corpus": corpus,
+        "window_config": window_config,
+        "estimated_gpu_seconds": estimate.estimated_gpu_seconds,
+        "estimated_retained_bytes": estimate.estimated_retained_bytes,
+        "batch_count": batch_count,
+        "clip_count": clip_count,
+        "wall_seconds": wall_seconds,
+        "failed_count": len(failed),
+        "failed": failed[:20],
+    }
 
 
 # --------------------------------------------------------------------------------------------

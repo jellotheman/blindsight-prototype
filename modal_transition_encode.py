@@ -34,6 +34,7 @@ from blindsight.transition.encode import (
     ExtractionWorkItem,
     ProvenanceMismatchError,
     WindowConfigName,
+    assemble_run_record,
     cache_relative_directory,
     enforce_cost_budget,
     estimate_extraction_cost,
@@ -411,28 +412,17 @@ def run_encoding(
 
     clip_ids = [clip.clip_id for clip in eligible]
     batches = [clip_ids[i : i + batch_size] for i in range(0, len(clip_ids), batch_size)]
-    batch_results = list(
-        encode_clip_batch.starmap(
+    return assemble_run_record(
+        manifest_name=manifest_name,
+        corpus=corpus,
+        window_config=window_config,
+        estimate=estimate,
+        batch_count=len(batches),
+        clip_count=len(clip_ids),
+        fan_out=lambda: encode_clip_batch.starmap(
             [(manifest_name, corpus, window_config, batch) for batch in batches]
-        )
+        ),
     )
-    failed = [
-        {"clip_id": r["clip_id"], "error": r["error"]}
-        for batch in batch_results
-        for r in batch["results"]  # type: ignore[index]
-        if r["status"] == "failed"
-    ]
-    return {
-        "manifest_name": manifest_name,
-        "corpus": corpus,
-        "window_config": window_config,
-        "estimated_gpu_seconds": estimate.estimated_gpu_seconds,
-        "estimated_retained_bytes": estimate.estimated_retained_bytes,
-        "batch_count": len(batches),
-        "clip_count": len(clip_ids),
-        "failed_count": len(failed),
-        "failed": failed[:20],
-    }
 
 
 @app.local_entrypoint()

@@ -8,6 +8,7 @@ real video -- that is exercised separately by a real, `live`-marked smoke test.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,9 +19,11 @@ from blindsight.transition.corpus import ManifestClip, ProxyBoundary
 from blindsight.transition.encode import (
     CacheMetadata,
     CostBudgetExceededError,
+    ExtractionCostEstimate,
     ExtractionWorkItem,
     ProvenanceMismatchError,
     WINDOW_CONFIGS,
+    assemble_run_record,
     boundary_context_range,
     cache_file_stem,
     center_crop,
@@ -425,6 +428,84 @@ class TestCostEstimate:
         )
 
         enforce_cost_budget(estimate)
+
+
+# --------------------------------------------------------------------------------------------
+# Run record assembly: the measured wall clock around the fan-out (issue #21's final record).
+# --------------------------------------------------------------------------------------------
+
+
+def _batch_result(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {"clip_id": "clip-1", "status": "completed", "items": [], "results": []}
+    base.update(overrides)
+    return base
+
+
+class TestAssembleRunRecord:
+    def _assemble(
+        self,
+        batch_results: list[dict[str, object]],
+        *,
+        estimate: ExtractionCostEstimate | None = None,
+    ) -> dict[str, object]:
+        if estimate is None:
+            estimate = estimate_extraction_cost([_work_item(emission_timestamps=(0.0, 1.0, 2.0))])
+        return assemble_run_record(
+            manifest_name="ego4d-only-v1",
+            corpus="ego4d",
+            window_config="short",
+            estimate=estimate,
+            batch_count=1,
+            clip_count=1,
+            fan_out=lambda: batch_results,
+        )
+
+    def test_success_record_has_non_negative_wall_seconds(self) -> None:
+        record = self._assemble([_batch_result()])
+
+        assert "wall_seconds" in record
+        assert record["wall_seconds"] >= 0.0
+
+    def test_failure_record_also_records_wall_seconds(self) -> None:
+        record = self._assemble(
+            [
+                _batch_result(
+                    status="completed",
+                    results=[{"clip_id": "clip-1", "status": "failed", "error": "no source video found"}],
+                )
+            ]
+        )
+
+        assert "wall_seconds" in record
+        assert record["wall_seconds"] >= 0.0
+        assert record["failed_count"] == 1
+        assert record["failed"] == [{"clip_id": "clip-1", "error": "no source video found"}]
+
+    def test_wall_seconds_measures_the_fan_out_itself(self) -> None:
+        def slow_fan_out() -> list[dict[str, object]]:
+            time.sleep(0.05)
+            return [_batch_result()]
+
+        estimate = estimate_extraction_cost([_work_item(emission_timestamps=(0.0, 1.0, 2.0))])
+        record = assemble_run_record(
+            manifest_name="ego4d-only-v1",
+            corpus="ego4d",
+            window_config="short",
+            estimate=estimate,
+            batch_count=1,
+            clip_count=1,
+            fan_out=slow_fan_out,
+        )
+
+        assert record["wall_seconds"] >= 0.04
+
+    def test_record_keeps_estimated_fields_unchanged(self) -> None:
+        estimate = estimate_extraction_cost([_work_item(emission_timestamps=(0.0, 1.0, 2.0))])
+
+        record = self._assemble([_batch_result()], estimate=estimate)
+
+        assert record["estimated_gpu_seconds"] == estimate.estimated_gpu_seconds
+        assert record["estimated_retained_bytes"] == estimate.estimated_retained_bytes
 
 
 # --------------------------------------------------------------------------------------------

@@ -454,7 +454,8 @@ implementer signs the agreements that cover the footage that the implementer dow
 The detector code lives in a separate package inside this repository.
 
 - The package is `blindsight/transition/`.
-- The Modal application file is `modal_transition.py`. It declares its own application name.
+- The Stage 3 Modal application files are `modal_transition.py` (corpus acquisition) and
+  `modal_transition_encode.py` (world-state encoding). Each file declares its own application name.
 - The package declares its own image, its own volumes, and its own GPU functions.
 - The ASGI application must not import the package. The package must not import the ASGI
   application.
