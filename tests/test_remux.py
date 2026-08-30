@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -70,6 +71,18 @@ def _require_ffmpeg_with_libx264() -> str:
     return ffmpeg
 
 
+def _require_ffmpeg_with_libx265() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is required to exercise FfmpegChunkRemuxer")
+    encoders = subprocess.run(
+        [ffmpeg, "-hide_banner", "-encoders"], capture_output=True, timeout=30
+    ).stdout
+    if encoders.count(b"libx265") == 0:
+        pytest.skip("libx265 is required to exercise FfmpegChunkRemuxer's HEVC transcode path")
+    return ffmpeg
+
+
 def _synthetic_webm(ffmpeg: str) -> bytes:
     return subprocess.run(
         [
@@ -125,6 +138,36 @@ def _synthetic_mp4(ffmpeg: str) -> bytes:
         return target.read_bytes()
 
 
+def _synthetic_hevc_mp4(ffmpeg: str) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target = Path(tmp_dir) / "source.mp4"
+        subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=64x64:rate=5",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv420p",
+                "-tag:v",
+                "hvc1",
+                "-movflags",
+                "+faststart",
+                str(target),
+            ],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        return target.read_bytes()
+
+
 def test_webm_capture_is_transcoded_to_h264_mp4() -> None:
     ffmpeg = _require_ffmpeg_with_libx264()
     ffprobe = shutil.which("ffprobe")
@@ -151,10 +194,54 @@ def test_mp4_capture_is_copy_remuxed_without_reencode() -> None:
     assert _ffprobe_video_codec(ffprobe, remuxed.content) == "h264"
 
 
+def test_h264_mp4_capture_runs_the_copy_command_not_the_transcode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ffmpeg = _require_ffmpeg_with_libx264()
+    mp4 = _synthetic_mp4(ffmpeg)
+    commands: list[list[str]] = []
+    real_run = subprocess.run
+
+    def recording_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        commands.append(command)
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", recording_run)
+
+    remuxed = FfmpegChunkRemuxer().remux(CaptureEvidence(content=mp4, media_type="video/mp4"))
+
+    assert remuxed.media_type == "video/mp4"
+    assert any("copy" in command for command in commands)
+    assert not any("libx264" in part for command in commands for part in command)
+
+
+def test_hevc_mp4_capture_is_transcoded_to_h264_mp4() -> None:
+    ffmpeg = _require_ffmpeg_with_libx265()
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        pytest.skip("ffprobe is required to verify the transcode")
+    hevc = _synthetic_hevc_mp4(ffmpeg)
+
+    remuxed = FfmpegChunkRemuxer().remux(CaptureEvidence(content=hevc, media_type="video/mp4"))
+
+    assert remuxed.media_type == "video/mp4"
+    assert _ffprobe_video_codec(ffprobe, remuxed.content) == "h264"
+
+
 def test_ffmpeg_failure_passes_evidence_through_unchanged() -> None:
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required to exercise the failure path")
     evidence = CaptureEvidence(content=b"not a real video file", media_type="video/webm")
+
+    remuxed = FfmpegChunkRemuxer().remux(evidence)
+
+    assert remuxed is evidence
+
+
+def test_unprobeable_mp4_passes_evidence_through_unchanged() -> None:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg is required to exercise the failure path")
+    evidence = CaptureEvidence(content=b"not a real video file", media_type="video/mp4")
 
     remuxed = FfmpegChunkRemuxer().remux(evidence)
 
