@@ -13,8 +13,9 @@ BlindSight is an environmental-understanding prototype for blind and low-vision 
 records a short, user-directed captured view, the backend returns a structured scene card, and the
 client speaks a concise orientation before offering details on demand.
 
-This repository is specification-first. The primary artifact is a text-only HTTP interface that a
-browser reference client and a React Native Android client can use equally.
+This repository is specification-first. The primary artifact is a text-only HTTP interface that the
+Expo client in `frontend/`, the legacy browser reference client, and other native clients can use
+equally.
 
 ## Start here
 
@@ -42,9 +43,19 @@ contract test suite described in the specification.
 
 ## Run locally, reachable from a phone
 
-The reference client's audio ladder and camera capture are only honestly testable from a real
-phone. One command starts the backend locally and publishes it through a Cloudflare quick tunnel,
-exposing the identical `/v1` interface a phone would reach on Modal:
+Install and export the Expo web client before starting the Python server:
+
+```powershell
+cd frontend
+npm ci
+npm run build:web
+cd ..
+```
+
+The Expo app is then served at `/`; the legacy reference web client remains available at
+`/reference/`. Camera, speech, and the audio ladder are only honestly testable from a real phone.
+One command starts the backend locally and publishes it through a Cloudflare quick tunnel, exposing
+the identical `/v1` interface a phone would reach on Modal:
 
 ```powershell
 python -m tools.local_dev --api-key <any shared key you choose>
@@ -65,8 +76,8 @@ Modal authentication and application authentication are separate:
 - The Modal CLI uses the local Modal profile created by `modal token new`. GitHub Actions uses the
   repository secrets `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` instead.
 - The BlindSight HTTP API uses the `BLINDSIGHT_API_KEY` value stored in the Modal secret named
-  `blindsight-api-key`. Enter that value in the reference client; it is sent as `X-API-Key` and
-  retained only in that browser's local storage.
+  `blindsight-api-key`. Enter that value in the client's Settings screen; it is sent as `X-API-Key`
+  and stored through the platform credential adapter where available.
 
 For a live-reloading development URL, run:
 
@@ -96,6 +107,10 @@ stored in the shared Modal Dict and fetched by Reka.
 To update the persistent deployment manually, run:
 
 ```powershell
+cd frontend
+npm ci
+npm run build:web
+cd ..
 python -m modal deploy modal_app.py
 ```
 

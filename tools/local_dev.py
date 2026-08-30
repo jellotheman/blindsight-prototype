@@ -27,10 +27,11 @@ from typing import IO
 
 from fastapi import FastAPI
 
-from blindsight.app import create_app, mount_reference_client
+from blindsight.app import create_app, mount_frontend_client, mount_reference_client
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = REPO_ROOT / "static"
+FRONTEND_DIST_DIR = REPO_ROOT / "frontend" / "dist"
 
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 DEFAULT_TUNNEL_TIMEOUT_SECONDS = 30.0
@@ -106,6 +107,7 @@ def wait_for_tunnel_url(lines: Queue[str | None], *, timeout_seconds: float) -> 
 def build_app(*, api_key: str) -> FastAPI:
     app = create_app(api_key=api_key)
     mount_reference_client(app, static_dir=STATIC_DIR)
+    mount_frontend_client(app, frontend_dist_dir=FRONTEND_DIST_DIR)
     return app
 
 

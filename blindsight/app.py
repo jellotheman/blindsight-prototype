@@ -315,14 +315,15 @@ def create_app(
 
 
 def mount_reference_client(app: FastAPI, static_dir: Path) -> FastAPI:
-    """Serve the reference web client from the same application as the API.
+    """Serve the legacy reference client at ``/reference/``.
 
     Deliberately unauthenticated: this only serves the static client shell, never `/v1` data, so
     it has no privileged path into the backend -- see docs/spec/phase-0-1.md.
     """
     from fastapi.staticfiles import StaticFiles
 
-    @app.get("/")
+    @app.get("/reference", include_in_schema=False)
+    @app.get("/reference/", include_in_schema=False)
     def index() -> Response:
         return Response(
             content=(static_dir / "index.html").read_bytes(),
@@ -331,4 +332,39 @@ def mount_reference_client(app: FastAPI, static_dir: Path) -> FastAPI:
         )
 
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    return app
+
+
+def mount_frontend_client(app: FastAPI, frontend_dist_dir: Path) -> FastAPI:
+    """Serve the exported Expo web app as the deployment's primary client.
+
+    API and legacy-reference routes are registered before this final root mount, so they retain
+    precedence. Expo Router's static export owns every remaining path and its ``/_expo`` assets.
+    """
+    from fastapi.staticfiles import StaticFiles
+    from starlette.exceptions import HTTPException
+    from starlette.types import Scope
+
+    class ExpoStaticFiles(StaticFiles):
+        async def get_response(self, path: str, scope: Scope) -> Response:
+            try:
+                return await super().get_response(path, scope)
+            except HTTPException as exc:
+                if exc.status_code != 404 or not path or Path(path).suffix:
+                    raise
+            # Expo Router's static output uses `route.html`, while browsers request `/route`.
+            return await super().get_response(f"{path}.html", scope)
+
+    index_path = frontend_dist_dir / "index.html"
+    if not index_path.is_file():
+        raise FileNotFoundError(
+            f"Expo web export not found at {index_path}. "
+            "Run `npm run build:web` from the frontend directory first."
+        )
+
+    app.mount(
+        "/",
+        ExpoStaticFiles(directory=frontend_dist_dir, html=True),
+        name="frontend",
+    )
     return app

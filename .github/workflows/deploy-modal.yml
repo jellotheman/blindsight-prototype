@@ -26,6 +26,20 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build Expo web client
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run build:web
+
       - name: Install project
         run: |
           sudo apt-get update

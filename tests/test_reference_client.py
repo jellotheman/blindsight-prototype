@@ -19,7 +19,7 @@ def client_with_reference_client(api_key: str) -> TestClient:
 
 
 def test_index_page_is_served_unauthenticated(client_with_reference_client: TestClient) -> None:
-    response = client_with_reference_client.get("/")
+    response = client_with_reference_client.get("/reference/")
     assert response.status_code == 200
     assert b"BlindSight" in response.content
 
@@ -47,7 +47,7 @@ def test_reference_client_never_reaches_backend_state_directly(client_with_refer
 def test_primary_surface_is_the_documented_full_page_tap_target(
     client_with_reference_client: TestClient,
 ) -> None:
-    page = client_with_reference_client.get("/")
+    page = client_with_reference_client.get("/reference/")
     assert b"Tap the center of the screen to record." in page.content
 
 
@@ -123,7 +123,7 @@ def _function_body(script: str, name: str) -> str:
 def test_page_offers_a_follow_up_question_control_and_a_done_control(
     client_with_reference_client: TestClient,
 ) -> None:
-    page = client_with_reference_client.get("/").text
+    page = client_with_reference_client.get("/reference/").text
     assert 'id="question"' in page
     assert 'id="ask"' in page
     assert 'id="done"' in page

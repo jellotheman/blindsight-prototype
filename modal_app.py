@@ -1,6 +1,6 @@
-"""Modal deployment: the BlindSight `/v1` API and the reference web client, served from one
-Modal application so the client has no privileged in-process path -- it calls the same HTTP
-interface any other caller would.
+"""Modal deployment: the BlindSight `/v1` API and both web clients, served from one Modal
+application. The Expo export is the primary client; the legacy reference client remains at
+``/reference/``. Both call the same HTTP interface as any other client.
 
 Deploy with:
 
@@ -50,6 +50,7 @@ image = (
     )
     .add_local_python_source("blindsight")
     .add_local_dir(str(ROOT / "data"), remote_path="/root/data")
+    .add_local_dir(str(ROOT / "frontend" / "dist"), remote_path="/root/frontend")
     .add_local_dir(str(ROOT / "static"), remote_path="/root/static")
 )
 
@@ -101,7 +102,7 @@ class _ModalFunctionTransitionWorker:
 @modal.concurrent(max_inputs=100)
 @modal.asgi_app()
 def web():
-    from blindsight.app import create_app, mount_reference_client
+    from blindsight.app import create_app, mount_frontend_client, mount_reference_client
     from blindsight.evidence import FileEvidenceStore
     from blindsight.excerpts import resolve_manifest_path
     from blindsight.providers import (
@@ -147,4 +148,5 @@ def web():
         ),
     )
     mount_reference_client(fastapi_app, static_dir=Path("/root/static"))
+    mount_frontend_client(fastapi_app, frontend_dist_dir=Path("/root/frontend"))
     return fastapi_app
