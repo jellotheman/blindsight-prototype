@@ -9,12 +9,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import threading
-import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator, Protocol
+from typing import Any, Callable, Protocol
 
 from .concurrency import run_with_deadline
 from .errors import ApiError, NotFound
@@ -129,28 +127,24 @@ class TransitionSessionStore(Protocol):
 
     def get(self, transition_session_id: str) -> dict[str, Any] | None: ...
 
-    def activate(self, transition_session_id: str) -> bool: ...
+    def put(self, transition_session_id: str, resource: dict[str, Any]) -> None: ...
 
-    def admit_chunk(
+    def delete(self, transition_session_id: str) -> None: ...
+
+    def put_chunk(
         self,
         transition_session_id: str,
         index: int,
         content: bytes,
         media_type: str,
         max_queued_bytes: int,
-    ) -> tuple[str, str | None]: ...
+    ) -> str: ...
 
-    def claim_next(
-        self, transition_session_id: str
-    ) -> tuple[int, bytes, str] | None: ...
+    def get_chunk(self, transition_session_id: str, index: int) -> tuple[bytes, str] | None: ...
 
-    def finish_chunk(
-        self, transition_session_id: str, index: int, content: bytes, events: list[dict[str, str]]
-    ) -> bool: ...
+    def mark_processed(self, transition_session_id: str, index: int, content: bytes) -> None: ...
 
-    def fail(self, transition_session_id: str, code: str) -> None: ...
-
-    def delete_and_claim_stop(self, transition_session_id: str) -> bool: ...
+    def clear_chunks(self, transition_session_id: str, indices: list[int]) -> None: ...
 
 
 class MemoryTransitionSessionStore:
@@ -171,110 +165,59 @@ class MemoryTransitionSessionStore:
             resource = self._resources.get(transition_session_id)
             return copy.deepcopy(resource) if resource is not None else None
 
-    def activate(self, transition_session_id: str) -> bool:
+    def put(self, transition_session_id: str, resource: dict[str, Any]) -> None:
         with self._lock:
-            resource = self._resources.get(transition_session_id)
-            if resource is None or resource["status"] != "starting":
-                return False
-            resource["status"] = "active"
-            resource["updated_at"] = _now()
-            return True
+            self._resources[transition_session_id] = copy.deepcopy(resource)
 
-    def admit_chunk(
+    def delete(self, transition_session_id: str) -> None:
+        with self._lock:
+            self._resources.pop(transition_session_id, None)
+
+    def put_chunk(
         self,
         transition_session_id: str,
         index: int,
         content: bytes,
         media_type: str,
         max_queued_bytes: int,
-    ) -> tuple[str, str | None]:
+    ) -> str:
         key = (transition_session_id, index)
         digest = hashlib.sha256(content).hexdigest()
         with self._lock:
-            resource = self._resources.get(transition_session_id)
-            if resource is None:
-                return ("missing", None)
-            if resource["status"] not in {"starting", "active"}:
-                return ("invalid_state", resource["status"])
             existing = self._chunks.get(key)
             if existing is not None:
-                return ("idempotent" if existing[0] == content else "conflict", None)
+                return "idempotent" if existing[0] == content else "conflict"
             processed_digest = self._processed_hashes.get(key)
             if processed_digest is not None:
-                return ("idempotent" if processed_digest == digest else "conflict", None)
+                return "idempotent" if processed_digest == digest else "conflict"
             queued_bytes = sum(
                 len(stored_content)
                 for (stored_session_id, _), (stored_content, _) in self._chunks.items()
                 if stored_session_id == transition_session_id
             )
             if queued_bytes + len(content) > max_queued_bytes:
-                return ("too_large", None)
+                return "too_large"
             self._chunks[key] = (bytes(content), media_type)
-            resource["_known_indices"].append(index)
-            resource["updated_at"] = _now()
-            return ("stored", None)
+            return "stored"
 
-    def claim_next(self, transition_session_id: str) -> tuple[int, bytes, str] | None:
+    def get_chunk(self, transition_session_id: str, index: int) -> tuple[bytes, str] | None:
+        key = (transition_session_id, index)
         with self._lock:
-            resource = self._resources.get(transition_session_id)
-            if resource is None or resource["status"] != "active":
-                return None
-            if resource.get("_processing_index") is not None:
-                return None
-            index = resource["_next_index"]
-            chunk = self._chunks.get((transition_session_id, index))
-            if chunk is None:
-                return None
-            resource["_processing_index"] = index
-            return (index, bytes(chunk[0]), chunk[1])
+            chunk = self._chunks.get(key)
+            return (bytes(chunk[0]), chunk[1]) if chunk is not None else None
 
-    def finish_chunk(
-        self, transition_session_id: str, index: int, content: bytes, events: list[dict[str, str]]
-    ) -> bool:
+    def mark_processed(self, transition_session_id: str, index: int, content: bytes) -> None:
+        key = (transition_session_id, index)
         with self._lock:
-            resource = self._resources.get(transition_session_id)
-            if (
-                resource is None
-                or resource["status"] != "active"
-                or resource.get("_processing_index") != index
-            ):
-                return False
-            self._chunks.pop((transition_session_id, index), None)
-            self._processed_hashes[(transition_session_id, index)] = hashlib.sha256(content).hexdigest()
-            resource["_processing_index"] = None
-            resource["_next_index"] = index + 1
-            resource["events"].extend(copy.deepcopy(events))
-            resource["updated_at"] = _now()
-            return True
-
-    def fail(self, transition_session_id: str, code: str) -> None:
-        with self._lock:
-            resource = self._resources.get(transition_session_id)
-            if resource is None:
-                return
-            resource["status"] = "failed"
-            resource["failure"] = {
-                "code": code,
-                "message": "Transition processing could not be completed.",
-                "retryable": code == "TRANSITION_ADAPTER_FAILED",
-            }
-            resource["_processing_index"] = None
-            resource["updated_at"] = _now()
-            self._clear_chunks(transition_session_id, resource["_known_indices"])
-
-    def delete_and_claim_stop(self, transition_session_id: str) -> bool:
-        with self._lock:
-            resource = self._resources.pop(transition_session_id, None)
-            if resource is None:
-                return False
-            self._clear_chunks(transition_session_id, resource["_known_indices"])
-            return True
-
-    def _clear_chunks(self, transition_session_id: str, indices: list[int]) -> None:
-        for index in indices:
-            key = (transition_session_id, index)
             self._chunks.pop(key, None)
-            self._processed_hashes.pop(key, None)
+            self._processed_hashes[key] = hashlib.sha256(content).hexdigest()
+
+    def clear_chunks(self, transition_session_id: str, indices: list[int]) -> None:
+        with self._lock:
+            for index in indices:
+                key = (transition_session_id, index)
+                self._chunks.pop(key, None)
+                self._processed_hashes.pop(key, None)
 
 
 class ModalTransitionSessionStore:
@@ -299,10 +242,6 @@ class ModalTransitionSessionStore:
     def _sizes_key(transition_session_id: str) -> str:
         return f"transition-chunk-sizes:{transition_session_id}"
 
-    @staticmethod
-    def _lock_key(transition_session_id: str) -> str:
-        return f"transition-lock:{transition_session_id}"
-
     def create(self, resource: dict[str, Any]) -> None:
         self._dictionary.put(self._resource_key(resource["transition_session_id"]), resource)
 
@@ -310,136 +249,54 @@ class ModalTransitionSessionStore:
         resource = self._dictionary.get(self._resource_key(transition_session_id))
         return copy.deepcopy(resource) if resource is not None else None
 
-    @contextmanager
-    def _locked(self, transition_session_id: str) -> Iterator[None]:
-        """Acquire Modal Dict's distributed lock primitive for one short state transition."""
-        lock_key = self._lock_key(transition_session_id)
-        token = uuid.uuid4().hex
-        deadline = time.monotonic() + 2
-        while not self._dictionary.put(lock_key, token, skip_if_exists=True):
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Timed out waiting for transition-session state lock.")
-            time.sleep(0.005)
-        try:
-            yield
-        finally:
-            # Only this owner writes the lock key, so removal cannot release another request.
-            if self._dictionary.get(lock_key) == token:
-                self._dictionary.pop(lock_key, None)
+    def put(self, transition_session_id: str, resource: dict[str, Any]) -> None:
+        self._dictionary.put(self._resource_key(transition_session_id), resource)
 
-    def activate(self, transition_session_id: str) -> bool:
-        with self._locked(transition_session_id):
-            resource = self._dictionary.get(self._resource_key(transition_session_id))
-            if not isinstance(resource, dict) or resource["status"] != "starting":
-                return False
-            resource["status"] = "active"
-            resource["updated_at"] = _now()
-            self._dictionary.put(self._resource_key(transition_session_id), resource)
-            return True
+    def delete(self, transition_session_id: str) -> None:
+        self._dictionary.pop(self._resource_key(transition_session_id), None)
 
-    def admit_chunk(
+    def put_chunk(
         self,
         transition_session_id: str,
         index: int,
         content: bytes,
         media_type: str,
         max_queued_bytes: int,
-    ) -> tuple[str, str | None]:
-        with self._locked(transition_session_id):
-            resource = self._dictionary.get(self._resource_key(transition_session_id))
-            if not isinstance(resource, dict):
-                return ("missing", None)
-            if resource["status"] not in {"starting", "active"}:
-                return ("invalid_state", resource["status"])
-            key = self._chunk_key(transition_session_id, index)
+    ) -> str:
+        key = self._chunk_key(transition_session_id, index)
+        stored = self._dictionary.put(key, (bytes(content), media_type), skip_if_exists=True)
+        if not stored:
             existing = self._dictionary.get(key)
             if existing is not None:
-                return ("idempotent" if existing[0] == content else "conflict", None)
+                return "idempotent" if existing[0] == content else "conflict"
             digest = self._dictionary.get(self._processed_key(transition_session_id, index))
-            if digest is not None:
-                outcome = "idempotent" if digest == hashlib.sha256(content).hexdigest() else "conflict"
-                return (outcome, None)
-            sizes_key = self._sizes_key(transition_session_id)
-            stored_sizes = self._dictionary.get(sizes_key)
-            sizes = dict(stored_sizes) if isinstance(stored_sizes, dict) else {}
-            if sum(sizes.values()) + len(content) > max_queued_bytes:
-                return ("too_large", None)
-            self._dictionary.put(key, (bytes(content), media_type))
-            sizes[index] = len(content)
-            self._dictionary.put(sizes_key, sizes)
-            resource["_known_indices"].append(index)
-            resource["updated_at"] = _now()
-            self._dictionary.put(self._resource_key(transition_session_id), resource)
-            return ("stored", None)
+            return "idempotent" if digest == hashlib.sha256(content).hexdigest() else "conflict"
+        sizes_key = self._sizes_key(transition_session_id)
+        stored_sizes = self._dictionary.get(sizes_key)
+        sizes = dict(stored_sizes) if isinstance(stored_sizes, dict) else {}
+        sizes[index] = len(content)
+        if sum(sizes.values()) > max_queued_bytes:
+            self._dictionary.pop(key, None)
+            return "too_large"
+        self._dictionary.put(sizes_key, sizes)
+        return "stored"
 
-    def claim_next(self, transition_session_id: str) -> tuple[int, bytes, str] | None:
-        with self._locked(transition_session_id):
-            resource = self._dictionary.get(self._resource_key(transition_session_id))
-            if not isinstance(resource, dict) or resource["status"] != "active":
-                return None
-            if resource.get("_processing_index") is not None:
-                return None
-            index = resource["_next_index"]
-            item = self._dictionary.get(self._chunk_key(transition_session_id, index))
-            if item is None:
-                return None
-            resource["_processing_index"] = index
-            self._dictionary.put(self._resource_key(transition_session_id), resource)
-            return (index, bytes(item[0]), item[1])
+    def get_chunk(self, transition_session_id: str, index: int) -> tuple[bytes, str] | None:
+        item = self._dictionary.get(self._chunk_key(transition_session_id, index))
+        return (bytes(item[0]), item[1]) if item is not None else None
 
-    def finish_chunk(
-        self, transition_session_id: str, index: int, content: bytes, events: list[dict[str, str]]
-    ) -> bool:
-        with self._locked(transition_session_id):
-            resource = self._dictionary.get(self._resource_key(transition_session_id))
-            if (
-                not isinstance(resource, dict)
-                or resource["status"] != "active"
-                or resource.get("_processing_index") != index
-            ):
-                return False
-            self._dictionary.pop(self._chunk_key(transition_session_id, index), None)
-            self._dictionary.put(
-                self._processed_key(transition_session_id, index), hashlib.sha256(content).hexdigest()
-            )
-            sizes_key = self._sizes_key(transition_session_id)
-            stored_sizes = self._dictionary.get(sizes_key)
-            sizes = dict(stored_sizes) if isinstance(stored_sizes, dict) else {}
-            sizes.pop(index, None)
-            self._dictionary.put(sizes_key, sizes)
-            resource["_processing_index"] = None
-            resource["_next_index"] = index + 1
-            resource["events"].extend(copy.deepcopy(events))
-            resource["updated_at"] = _now()
-            self._dictionary.put(self._resource_key(transition_session_id), resource)
-            return True
+    def mark_processed(self, transition_session_id: str, index: int, content: bytes) -> None:
+        self._dictionary.pop(self._chunk_key(transition_session_id, index), None)
+        self._dictionary.put(
+            self._processed_key(transition_session_id, index), hashlib.sha256(content).hexdigest()
+        )
+        sizes_key = self._sizes_key(transition_session_id)
+        stored_sizes = self._dictionary.get(sizes_key)
+        sizes = dict(stored_sizes) if isinstance(stored_sizes, dict) else {}
+        sizes.pop(index, None)
+        self._dictionary.put(sizes_key, sizes)
 
-    def fail(self, transition_session_id: str, code: str) -> None:
-        with self._locked(transition_session_id):
-            resource = self._dictionary.get(self._resource_key(transition_session_id))
-            if not isinstance(resource, dict):
-                return
-            resource["status"] = "failed"
-            resource["failure"] = {
-                "code": code,
-                "message": "Transition processing could not be completed.",
-                "retryable": code == "TRANSITION_ADAPTER_FAILED",
-            }
-            resource["_processing_index"] = None
-            resource["updated_at"] = _now()
-            self._clear_chunks(transition_session_id, resource["_known_indices"])
-            self._dictionary.put(self._resource_key(transition_session_id), resource)
-
-    def delete_and_claim_stop(self, transition_session_id: str) -> bool:
-        with self._locked(transition_session_id):
-            resource = self._dictionary.get(self._resource_key(transition_session_id))
-            if not isinstance(resource, dict):
-                return False
-            self._dictionary.pop(self._resource_key(transition_session_id), None)
-            self._clear_chunks(transition_session_id, resource["_known_indices"])
-            return True
-
-    def _clear_chunks(self, transition_session_id: str, indices: list[int]) -> None:
+    def clear_chunks(self, transition_session_id: str, indices: list[int]) -> None:
         for index in indices:
             self._dictionary.pop(self._chunk_key(transition_session_id, index), None)
             self._dictionary.pop(self._processed_key(transition_session_id, index), None)
@@ -478,7 +335,6 @@ class TransitionService:
             "created_at": created_at,
             "updated_at": created_at,
             "_next_index": 0,
-            "_processing_index": None,
             "_known_indices": [],
         }
         self._store.create(resource)
@@ -498,24 +354,25 @@ class TransitionService:
     def put_chunk(
         self, transition_session_id: str, index: int, content: bytes, media_type: str
     ) -> dict[str, Any]:
+        resource = self._store.get(transition_session_id)
+        if resource is None:
+            raise NotFound(f"No transition session with id {transition_session_id!r}.")
+        if resource["status"] not in {"starting", "active"}:
+            raise ApiError(
+                409,
+                "INVALID_STATE",
+                "The transition session is no longer accepting chunks.",
+                details={"status": resource["status"]},
+            )
         if not 0 <= index <= 999_999 or not content:
             raise ApiError(400, "INVALID_REQUEST", "A non-empty chunk and valid index are required.")
         if media_type not in MEDIA_TYPES:
             raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Unsupported transition chunk media type.")
         if len(content) > self._max_chunk_bytes:
             raise ApiError(413, "TRANSITION_QUEUE_TOO_LARGE", "The chunk exceeds the byte limit.")
-        outcome, status = self._store.admit_chunk(
+        outcome = self._store.put_chunk(
             transition_session_id, index, content, media_type, self._max_queued_bytes
         )
-        if outcome == "missing":
-            raise NotFound(f"No transition session with id {transition_session_id!r}.")
-        if outcome == "invalid_state":
-            raise ApiError(
-                409,
-                "INVALID_STATE",
-                "The transition session is no longer accepting chunks.",
-                details={"status": status},
-            )
         if outcome == "conflict":
             raise ApiError(
                 409,
@@ -530,6 +387,9 @@ class TransitionService:
                 "The queued transition media exceeds the byte limit.",
             )
         if outcome == "stored":
+            resource["_known_indices"].append(index)
+            resource["updated_at"] = _now()
+            self._store.put(transition_session_id, resource)
             self._runner.submit(lambda: self._drain(transition_session_id))
         return {
             "transition_session_id": transition_session_id,
@@ -539,55 +399,84 @@ class TransitionService:
         }
 
     def delete(self, transition_session_id: str) -> None:
-        if not self._store.delete_and_claim_stop(transition_session_id):
+        resource = self._store.get(transition_session_id)
+        if resource is None:
             raise NotFound(f"No transition session with id {transition_session_id!r}.")
-        run_with_deadline(
-            lambda: self._adapter.stop(transition_session_id), self._processing_deadline_seconds
-        )
+        self._store.delete(transition_session_id)
+        self._store.clear_chunks(transition_session_id, resource["_known_indices"])
+        try:
+            run_with_deadline(
+                lambda: self._adapter.stop(transition_session_id), self._processing_deadline_seconds
+            )
+        except Exception:
+            # Stop was accepted locally; a worker-specific cleanup failure cannot resurrect a
+            # deleted public resource or make it accept more media.
+            pass
 
     def _start(self, transition_session_id: str) -> None:
-        # Avoid starting remote work when a client deleted the session before this background
-        # task was scheduled. Activation below is the authoritative cross-container transition.
-        if self._store.get(transition_session_id) is None:
+        resource = self._store.get(transition_session_id)
+        if resource is None or resource["status"] != "starting":
             return
         outcome, value = run_with_deadline(
             lambda: self._adapter.start(transition_session_id), self._processing_deadline_seconds
         )
-        if outcome != "result":
-            self._fail(transition_session_id, "TRANSITION_ADAPTER_FAILED")
+        resource = self._store.get(transition_session_id)
+        if resource is None or resource["status"] != "starting":
             return
-        if self._store.activate(transition_session_id):
-            self._drain(transition_session_id)
+        if outcome != "result":
+            self._fail(resource, "TRANSITION_ADAPTER_FAILED")
+            return
+        resource["status"] = "active"
+        resource["updated_at"] = _now()
+        self._store.put(transition_session_id, resource)
+        self._drain(transition_session_id)
 
     def _drain(self, transition_session_id: str) -> None:
         with self._drain_lock:
             while True:
-                claimed = self._store.claim_next(transition_session_id)
-                if claimed is None:
+                resource = self._store.get(transition_session_id)
+                if resource is None or resource["status"] != "active":
                     return
-                index, content, media_type = claimed
+                index = resource["_next_index"]
+                chunk = self._store.get_chunk(transition_session_id, index)
+                if chunk is None:
+                    return
+                content, media_type = chunk
                 outcome, value = run_with_deadline(
                     lambda: self._adapter.process(transition_session_id, index, content, media_type),
                     self._processing_deadline_seconds,
                 )
+                resource = self._store.get(transition_session_id)
+                if resource is None or resource["status"] != "active":
+                    return
                 if outcome != "result" or not isinstance(value, list):
-                    self._fail(transition_session_id, "TRANSITION_ADAPTER_FAILED")
+                    self._fail(resource, "TRANSITION_ADAPTER_FAILED")
                     return
                 if not all(isinstance(observation, TransitionObservation) for observation in value):
-                    self._fail(transition_session_id, "TRANSITION_ADAPTER_FAILED")
+                    self._fail(resource, "TRANSITION_ADAPTER_FAILED")
                     return
-                events = [
+                self._store.mark_processed(transition_session_id, index, content)
+                resource["_next_index"] = index + 1
+                resource["events"].extend(
                     {
                         "transition_event_id": _identifier("tev"),
                         "observed_at": observation.observed_at,
                     }
                     for observation in value
-                ]
-                if not self._store.finish_chunk(transition_session_id, index, content, events):
-                    return
+                )
+                resource["updated_at"] = _now()
+                self._store.put(transition_session_id, resource)
 
-    def _fail(self, transition_session_id: str, code: str) -> None:
-        self._store.fail(transition_session_id, code)
+    def _fail(self, resource: dict[str, Any], code: str) -> None:
+        resource["status"] = "failed"
+        resource["failure"] = {
+            "code": code,
+            "message": "Transition processing could not be completed.",
+            "retryable": code == "TRANSITION_ADAPTER_FAILED",
+        }
+        resource["updated_at"] = _now()
+        self._store.clear_chunks(resource["transition_session_id"], resource["_known_indices"])
+        self._store.put(resource["transition_session_id"], resource)
 
     @staticmethod
     def _public(resource: dict[str, Any], cursor: str | None) -> dict[str, Any]:
