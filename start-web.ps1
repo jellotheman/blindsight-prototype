@@ -46,11 +46,11 @@ try {
 
     if ($Phone) {
         Write-Host 'Starting the web client with a phone-accessible HTTPS tunnel...'
-        & $venvPython -m tools.local_dev --port $Port --generate-api-key
+        & $venvPython -m tools.local_dev --port $Port --auto-port --generate-api-key
     }
     else {
         Write-Host 'Starting the web client for this computer only...'
-        & $venvPython -m tools.local_dev --port $Port --no-tunnel --generate-api-key
+        & $venvPython -m tools.local_dev --port $Port --auto-port --no-tunnel --generate-api-key
     }
 }
 finally {

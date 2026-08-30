@@ -43,7 +43,7 @@ try {
     }
 
     $shellPath = (Get-Process -Id $PID).Path
-    $backendCommand = "& `"$venvPython`" -m tools.local_dev --port $ApiPort --generate-api-key"
+    $backendCommand = "& `"$venvPython`" -m tools.local_dev --port $ApiPort --auto-port --generate-api-key"
     Start-Process -FilePath $shellPath -WorkingDirectory $repoRoot -ArgumentList @(
             '-NoExit',
             '-ExecutionPolicy', 'Bypass',

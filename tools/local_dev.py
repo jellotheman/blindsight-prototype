@@ -78,6 +78,12 @@ def require_free_port(host: str, port: int) -> None:
             ) from exc
 
 
+def find_free_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind((host, 0))
+        return int(probe.getsockname()[1])
+
+
 def wait_for_tunnel_url(lines: Queue[str | None], *, timeout_seconds: float) -> str:
     """Read cloudflared output lines from `lines` until a tunnel URL appears or time runs out.
 
@@ -150,6 +156,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
+        "--auto-port",
+        action="store_true",
+        help="Choose another free port when the requested port is occupied.",
+    )
+    parser.add_argument(
         "--api-key",
         default=os.environ.get("BLINDSIGHT_API_KEY"),
         help="Shared key the local server requires. Prompts when omitted.",
@@ -184,7 +195,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        require_free_port(args.host, args.port)
+        try:
+            require_free_port(args.host, args.port)
+        except PortOccupiedError:
+            if not args.auto_port:
+                raise
+            previous_port = args.port
+            args.port = find_free_port(args.host)
+            print(f"Port {previous_port} is busy; using port {args.port} instead.")
         cloudflared_path = None
         if not args.no_tunnel:
             cloudflared_path = require_tool(
