@@ -14,6 +14,7 @@ artifacts/
 *.wav
 *.log
 .modal/
+sessions/
 node_modules/
 dist/
 *.egg-info/
