@@ -402,11 +402,16 @@ shapes.
 ## Out of Scope
 
 - Required or optional guided 360-degree room capture.
-- Automatic place-transition detection.
+- Automatic place-transition detection. Specified in `phase-3-transition.md`.
 - Relative depth or reliable spatial geometry.
-- Continuous video streaming as an implemented capability.
-- Proactive reminders or persistent multi-room memory.
-- Training or fine-tuning any model.
+- Continuous video streaming as an implemented capability. Continuous world-state extraction for
+  transition detection is specified in `phase-3-transition.md`; continuous streaming as an ingestion
+  path for scene cards remains out of scope everywhere.
+- Proactive reminders. A Stage 3 transition event produces one earcon and never a description or a
+  capture; see `phase-3-transition.md`.
+- Persistent multi-room memory.
+- Training or fine-tuning any model. Stage 3 trains a transition detector on frozen encoder output;
+  see `phase-3-transition.md`. No model that produces a scene card is ever trained or fine-tuned.
 - Safety, hazard detection, navigation, or mobility-aid behavior or claims.
 - A native application implementation or app-store distribution.
 - Server-side text-to-speech.
