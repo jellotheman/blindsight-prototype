@@ -20,6 +20,8 @@ class CaptureStore(Protocol):
 
     def get_chunks(self, capture_id: str, count: int) -> dict[int, bytes]: ...
 
+    def delete_chunks(self, capture_id: str, count: int) -> None: ...
+
     def put_media(self, capture_id: str, content: bytes, media_type: str) -> None: ...
 
     def get_media(self, capture_id: str) -> tuple[bytes, str] | None: ...
@@ -88,6 +90,11 @@ class MemoryCaptureStore:
                 if stored_capture_id == capture_id and index < count
             }
 
+    def delete_chunks(self, capture_id: str, count: int) -> None:
+        with self._lock:
+            for index in range(count):
+                self._chunks.pop((capture_id, index), None)
+
     def put_media(self, capture_id: str, content: bytes, media_type: str) -> None:
         with self._lock:
             self._media[capture_id] = (bytes(content), media_type)
@@ -108,7 +115,14 @@ class MemoryCaptureStore:
 
     def delete_session(self, scene_session_id: str) -> None:
         with self._lock:
-            self._sessions.pop(scene_session_id, None)
+            session = self._sessions.pop(scene_session_id, None)
+            if session is None:
+                return
+            capture_id = session.get("capture_id")
+            if isinstance(capture_id, str):
+                self._media.pop(capture_id, None)
+            for question_id in session.get("question_ids", []):
+                self._questions.pop(question_id, None)
 
     def create_question(self, resource: dict[str, Any]) -> None:
         with self._lock:
@@ -143,6 +157,10 @@ class ModalCaptureStore:
         return f"chunk:{capture_id}:{index}"
 
     @staticmethod
+    def _chunk_sizes_key(capture_id: str) -> str:
+        return f"chunksizes:{capture_id}"
+
+    @staticmethod
     def _media_key(capture_id: str) -> str:
         return f"media:{capture_id}"
 
@@ -169,15 +187,18 @@ class ModalCaptureStore:
         if not stored:
             existing = self._dictionary.get(key)
             return "idempotent" if existing == content else "conflict"
-        prefix = f"chunk:{capture_id}:"
-        total = sum(
-            len(value)
-            for stored_key, value in self._dictionary.items()
-            if isinstance(stored_key, str) and stored_key.startswith(prefix)
-        )
-        if total > max_total_bytes:
+        # Accumulated size is tracked in a small per-capture sidecar rather than derived by
+        # scanning the Dict: a whole-Dict scan transfers every stored value -- including other
+        # captures' chunk payloads -- on every chunk upload, which grows without bound and
+        # eventually exceeds the request deadline.
+        sizes_key = self._chunk_sizes_key(capture_id)
+        stored_sizes = self._dictionary.get(sizes_key)
+        sizes = dict(stored_sizes) if isinstance(stored_sizes, dict) else {}
+        sizes[index] = len(content)
+        if sum(sizes.values()) > max_total_bytes:
             self._dictionary.pop(key, None)
             return "too_large"
+        self._dictionary.put(sizes_key, sizes)
         return "stored"
 
     def get_chunks(self, capture_id: str, count: int) -> dict[int, bytes]:
@@ -187,6 +208,11 @@ class ModalCaptureStore:
             if content is not None:
                 chunks[index] = content
         return chunks
+
+    def delete_chunks(self, capture_id: str, count: int) -> None:
+        for index in range(count):
+            self._dictionary.pop(self._chunk_key(capture_id, index), None)
+        self._dictionary.pop(self._chunk_sizes_key(capture_id), None)
 
     def put_media(self, capture_id: str, content: bytes, media_type: str) -> None:
         self._dictionary.put(self._media_key(capture_id), (bytes(content), media_type))
@@ -206,7 +232,15 @@ class ModalCaptureStore:
         self._dictionary.put(self._session_key(scene_session_id), session)
 
     def delete_session(self, scene_session_id: str) -> None:
+        session = self._dictionary.get(self._session_key(scene_session_id))
         self._dictionary.pop(self._session_key(scene_session_id), None)
+        if not isinstance(session, dict):
+            return
+        capture_id = session.get("capture_id")
+        if isinstance(capture_id, str):
+            self._dictionary.pop(self._media_key(capture_id), None)
+        for question_id in session.get("question_ids", []):
+            self._dictionary.pop(self._question_key(question_id), None)
 
     def create_question(self, resource: dict[str, Any]) -> None:
         self._dictionary.put(self._question_key(resource["question_id"]), resource)

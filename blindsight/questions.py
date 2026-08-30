@@ -79,6 +79,8 @@ class QuestionService:
         }
         self.store.create_question(resource)
         session["conversation"].append({"role": "user", "content": question})
+        # Recorded so deleting the scene session can drop its question resources with it.
+        session.setdefault("question_ids", []).append(question_id)
         self.store.put_session(scene_session_id, session)
 
         self.runner.submit(lambda: self._answer_from_card(question_id))

@@ -156,6 +156,9 @@ class CaptureService:
         resource["status"] = "processing"
         resource["updated_at"] = _now()
         self.store.put_capture(capture_id, resource)
+        # The clip is assembled; the capture no longer accepts chunks, so the per-chunk copies
+        # are dead weight in the shared store from here on.
+        self.store.delete_chunks(capture_id, chunk_count)
         evidence = CaptureEvidence(content=content, media_type=mime_type)
         self.runner.submit(lambda: self._process(capture_id, evidence))
         return resource
