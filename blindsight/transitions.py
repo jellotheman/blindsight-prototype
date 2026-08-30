@@ -9,10 +9,12 @@ from __future__ import annotations
 import copy
 import hashlib
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterator, Protocol
 
 from .concurrency import run_with_deadline
 from .errors import ApiError, NotFound
@@ -156,9 +158,13 @@ class TransitionSessionStore(Protocol):
 
     def get(self, transition_session_id: str) -> dict[str, Any] | None: ...
 
-    def put(self, transition_session_id: str, resource: dict[str, Any]) -> None: ...
+    def update(
+        self,
+        transition_session_id: str,
+        mutate: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any] | None: ...
 
-    def delete(self, transition_session_id: str) -> None: ...
+    def pop(self, transition_session_id: str) -> dict[str, Any] | None: ...
 
     def put_chunk(
         self,
@@ -202,13 +208,25 @@ class MemoryTransitionSessionStore:
             resource = self._resources.get(transition_session_id)
             return copy.deepcopy(resource) if resource is not None else None
 
-    def put(self, transition_session_id: str, resource: dict[str, Any]) -> None:
+    def update(
+        self,
+        transition_session_id: str,
+        mutate: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
         with self._lock:
-            self._resources[transition_session_id] = copy.deepcopy(resource)
+            resource = self._resources.get(transition_session_id)
+            if resource is None:
+                return None
+            result = mutate(copy.deepcopy(resource))
+            if result is None:
+                return copy.deepcopy(resource)
+            self._resources[transition_session_id] = copy.deepcopy(result)
+            return copy.deepcopy(result)
 
-    def delete(self, transition_session_id: str) -> None:
+    def pop(self, transition_session_id: str) -> dict[str, Any] | None:
         with self._lock:
-            self._resources.pop(transition_session_id, None)
+            resource = self._resources.pop(transition_session_id, None)
+            return copy.deepcopy(resource) if resource is not None else None
 
     def put_chunk(
         self,
@@ -306,6 +324,27 @@ class ModalTransitionSessionStore:
     def _claim_key(transition_session_id: str, index: int) -> str:
         return f"transition-claim:{transition_session_id}:{index}"
 
+    @staticmethod
+    def _resource_lock_key(transition_session_id: str) -> str:
+        return f"transition-resource-lock:{transition_session_id}"
+
+    @contextmanager
+    def _locked(self, transition_session_id: str) -> Iterator[None]:
+        """Acquire Modal Dict's distributed lock primitive for one short state transition."""
+        lock_key = self._resource_lock_key(transition_session_id)
+        token = uuid.uuid4().hex
+        deadline = time.monotonic() + 2
+        while not self._dictionary.put(lock_key, token, skip_if_exists=True):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Timed out waiting for transition-session state lock.")
+            time.sleep(0.005)
+        try:
+            yield
+        finally:
+            # Only this owner writes the lock key, so removal cannot release another request.
+            if self._dictionary.get(lock_key) == token:
+                self._dictionary.pop(lock_key, None)
+
     def create(self, resource: dict[str, Any]) -> None:
         self._dictionary.put(self._resource_key(resource["transition_session_id"]), resource)
 
@@ -313,11 +352,30 @@ class ModalTransitionSessionStore:
         resource = self._dictionary.get(self._resource_key(transition_session_id))
         return copy.deepcopy(resource) if resource is not None else None
 
-    def put(self, transition_session_id: str, resource: dict[str, Any]) -> None:
-        self._dictionary.put(self._resource_key(transition_session_id), resource)
+    def update(
+        self,
+        transition_session_id: str,
+        mutate: Callable[[dict[str, Any]], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
+        key = self._resource_key(transition_session_id)
+        with self._locked(transition_session_id):
+            resource = self._dictionary.get(key)
+            if not isinstance(resource, dict):
+                return None
+            result = mutate(copy.deepcopy(resource))
+            if result is None:
+                return copy.deepcopy(resource)
+            self._dictionary.put(key, result)
+            return copy.deepcopy(result)
 
-    def delete(self, transition_session_id: str) -> None:
-        self._dictionary.pop(self._resource_key(transition_session_id), None)
+    def pop(self, transition_session_id: str) -> dict[str, Any] | None:
+        key = self._resource_key(transition_session_id)
+        with self._locked(transition_session_id):
+            resource = self._dictionary.get(key)
+            if not isinstance(resource, dict):
+                return None
+            self._dictionary.pop(key, None)
+            return copy.deepcopy(resource)
 
     def put_chunk(
         self,
@@ -492,9 +550,12 @@ class TransitionService:
                 "The queued transition media exceeds the byte limit.",
             )
         if outcome == "stored":
-            resource["_known_indices"].append(index)
-            resource["updated_at"] = self._timestamp()
-            self._store.put(transition_session_id, resource)
+            def record_index(current: dict[str, Any]) -> dict[str, Any]:
+                current["_known_indices"].append(index)
+                current["updated_at"] = self._timestamp()
+                return current
+
+            self._store.update(transition_session_id, record_index)
             self._runner.submit(lambda: self._drain(transition_session_id))
         return {
             "transition_session_id": transition_session_id,
@@ -504,10 +565,9 @@ class TransitionService:
         }
 
     def delete(self, transition_session_id: str) -> None:
-        resource = self._store.get(transition_session_id)
+        resource = self._store.pop(transition_session_id)
         if resource is None:
             raise NotFound(f"No transition session with id {transition_session_id!r}.")
-        self._store.delete(transition_session_id)
         self._store.clear_chunks(transition_session_id, resource["_known_indices"])
         try:
             run_with_deadline(
@@ -525,16 +585,20 @@ class TransitionService:
         outcome, value = run_with_deadline(
             lambda: self._adapter.start(transition_session_id), self._processing_deadline_seconds
         )
-        resource = self._store.get(transition_session_id)
-        if resource is None or resource["status"] != "starting":
-            return
         if outcome != "result":
-            self._fail(resource, "TRANSITION_ADAPTER_FAILED")
+            self._fail(transition_session_id, "TRANSITION_ADAPTER_FAILED", expected_status="starting")
             return
-        resource["status"] = "active"
-        resource["updated_at"] = self._timestamp()
-        self._store.put(transition_session_id, resource)
-        self._drain(transition_session_id)
+
+        def activate(current: dict[str, Any]) -> dict[str, Any] | None:
+            if current["status"] != "starting":
+                return None
+            current["status"] = "active"
+            current["updated_at"] = self._timestamp()
+            return current
+
+        updated = self._store.update(transition_session_id, activate)
+        if updated is not None and updated["status"] == "active":
+            self._drain(transition_session_id)
 
     def _drain(self, transition_session_id: str) -> None:
         with self._drain_lock:
@@ -580,10 +644,6 @@ class TransitionService:
                     lambda: self._adapter.process_prefix(transition_session_id, items),
                     self._processing_deadline_seconds,
                 )
-                resource = self._store.get(transition_session_id)
-                if resource is None or resource["status"] != "active":
-                    self._release_claims(transition_session_id, claims)
-                    return
                 if (
                     outcome != "result"
                     or not isinstance(value, list)
@@ -592,21 +652,29 @@ class TransitionService:
                     )
                 ):
                     self._release_claims(transition_session_id, claims)
-                    self._fail(resource, "TRANSITION_ADAPTER_FAILED")
+                    self._fail(transition_session_id, "TRANSITION_ADAPTER_FAILED", expected_status="active")
                     return
                 for item_index, content, _ in items:
                     self._store.mark_processed(transition_session_id, item_index, content)
-                resource["_next_index"] = items[-1][0] + 1
-                resource["events"].extend(
-                    {
-                        "transition_event_id": _identifier("tev"),
-                        "observed_at": observation.observed_at,
-                    }
-                    for observation in value
-                )
-                resource["updated_at"] = self._timestamp()
-                self._store.put(transition_session_id, resource)
+
+                def advance(current: dict[str, Any]) -> dict[str, Any] | None:
+                    if current["status"] != "active":
+                        return None
+                    current["_next_index"] = items[-1][0] + 1
+                    current["events"].extend(
+                        {
+                            "transition_event_id": _identifier("tev"),
+                            "observed_at": observation.observed_at,
+                        }
+                        for observation in value
+                    )
+                    current["updated_at"] = self._timestamp()
+                    return current
+
+                updated = self._store.update(transition_session_id, advance)
                 self._release_claims(transition_session_id, claims)
+                if updated is None or updated["status"] != "active":
+                    return
 
     def _release_claims(
         self, transition_session_id: str, claims: list[tuple[int, str]]
@@ -614,16 +682,22 @@ class TransitionService:
         for index, token in claims:
             self._store.release_claim(transition_session_id, index, token)
 
-    def _fail(self, resource: dict[str, Any], code: str) -> None:
-        resource["status"] = "failed"
-        resource["failure"] = {
-            "code": code,
-            "message": "Transition processing could not be completed.",
-            "retryable": code == "TRANSITION_ADAPTER_FAILED",
-        }
-        resource["updated_at"] = self._timestamp()
-        self._store.clear_chunks(resource["transition_session_id"], resource["_known_indices"])
-        self._store.put(resource["transition_session_id"], resource)
+    def _fail(self, transition_session_id: str, code: str, *, expected_status: str) -> None:
+        def mark_failed(current: dict[str, Any]) -> dict[str, Any] | None:
+            if current["status"] != expected_status:
+                return None
+            current["status"] = "failed"
+            current["failure"] = {
+                "code": code,
+                "message": "Transition processing could not be completed.",
+                "retryable": code == "TRANSITION_ADAPTER_FAILED",
+            }
+            current["updated_at"] = self._timestamp()
+            return current
+
+        updated = self._store.update(transition_session_id, mark_failed)
+        if updated is not None and updated["status"] == "failed":
+            self._store.clear_chunks(transition_session_id, updated["_known_indices"])
 
     def _expire_if_idle(self, transition_session_id: str, resource: dict[str, Any]) -> dict[str, Any]:
         if self._idle_timeout_seconds <= 0 or resource["status"] != "active":
@@ -633,15 +707,30 @@ class TransitionService:
             return resource
         if (self._clock() - updated_at).total_seconds() < self._idle_timeout_seconds:
             return resource
-        resource["status"] = "failed"
-        resource["failure"] = {
-            "code": "TRANSITION_ADAPTER_FAILED",
-            "message": "The transition session expired after a period of inactivity.",
-            "retryable": False,
-        }
-        resource["updated_at"] = self._timestamp()
-        self._store.clear_chunks(transition_session_id, resource["_known_indices"])
-        self._store.put(transition_session_id, resource)
+
+        def expire(current: dict[str, Any]) -> dict[str, Any] | None:
+            if current["status"] != "active":
+                return None
+            current_updated_at = _parse_timestamp(current.get("updated_at"))
+            if current_updated_at is None:
+                return None
+            if (self._clock() - current_updated_at).total_seconds() < self._idle_timeout_seconds:
+                return None
+            current["status"] = "failed"
+            current["failure"] = {
+                "code": "TRANSITION_ADAPTER_FAILED",
+                "message": "The transition session expired after a period of inactivity.",
+                "retryable": False,
+            }
+            current["updated_at"] = self._timestamp()
+            return current
+
+        updated = self._store.update(transition_session_id, expire)
+        if updated is None:
+            return resource
+        if updated["status"] != "failed":
+            return updated
+        self._store.clear_chunks(transition_session_id, updated["_known_indices"])
         try:
             run_with_deadline(
                 lambda: self._adapter.stop(transition_session_id), self._processing_deadline_seconds
@@ -650,7 +739,7 @@ class TransitionService:
             # Stop was accepted locally; a worker-specific cleanup failure cannot resurrect an
             # expired session or make it accept more media.
             pass
-        return resource
+        return updated
 
     @staticmethod
     def _public(resource: dict[str, Any], cursor: str | None) -> dict[str, Any]:

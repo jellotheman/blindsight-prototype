@@ -301,6 +301,63 @@ def test_modal_backed_sessions_coordinate_queue_limits_and_deletion_across_apps(
     assert adapter.stopped_session_ids == [created.json()["transition_session_id"]]
 
 
+@pytest.mark.parametrize(
+    "make_store",
+    [
+        lambda: MemoryTransitionSessionStore(),
+        lambda: ModalTransitionSessionStore(SharedModalDict()),
+    ],
+    ids=["memory", "modal"],
+)
+def test_concurrent_updates_to_the_same_session_do_not_lose_writes(
+    make_store: Callable[[], Any],
+) -> None:
+    """``update`` must be a true read-modify-write: no interleaving of two callers may drop a write.
+
+    Before the session store exposed an atomic ``update``, every caller (``put_chunk``, ``_drain``,
+    ``_fail``, ``_expire_if_idle``) did its own unprotected get-mutate-put of the whole resource
+    dict. Two callers racing on different fields (e.g. a chunk PUT appending to ``_known_indices``
+    while a drain call advances ``_next_index`` and ``events``) would silently clobber each other,
+    because the last ``put`` wins in full. This drives many threads through ``update`` concurrently
+    and asserts every single mutation survived.
+    """
+    store = make_store()
+    session_id = "trs_concurrency"
+    store.create(
+        {
+            "transition_session_id": session_id,
+            "status": "active",
+            "events": [],
+            "failure": None,
+            "created_at": "2026-08-30T06:30:00Z",
+            "updated_at": "2026-08-30T06:30:00Z",
+            "_next_index": 0,
+            "_known_indices": [],
+        }
+    )
+
+    thread_count = 50
+    barrier = threading.Barrier(thread_count)
+
+    def append_index(index: int) -> None:
+        barrier.wait()
+
+        def mutate(resource: dict[str, Any]) -> dict[str, Any]:
+            resource["_known_indices"].append(index)
+            return resource
+
+        store.update(session_id, mutate)
+
+    threads = [threading.Thread(target=append_index, args=(i,)) for i in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    resource = store.get(session_id)
+    assert sorted(resource["_known_indices"]) == list(range(thread_count))
+
+
 def make_modal_transition_service(
     dictionary: SharedModalDict, clock: StaticClock, adapter: InMemoryTransitionAdapter
 ) -> tuple[TransitionService, ModalTransitionSessionStore]:
