@@ -14,10 +14,8 @@ provider wiring belongs to the deployed Modal application, not this tool.
 from __future__ import annotations
 
 import argparse
-import getpass
 import os
 import re
-import secrets
 import shutil
 import socket
 import subprocess
@@ -29,11 +27,10 @@ from typing import IO
 
 from fastapi import FastAPI
 
-from blindsight.app import create_app, mount_frontend_client, mount_reference_client
+from blindsight.app import create_app, mount_reference_client
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = REPO_ROOT / "static"
-FRONTEND_DIST_DIR = REPO_ROOT / "frontend" / "dist"
 
 TUNNEL_URL_PATTERN = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 DEFAULT_TUNNEL_TIMEOUT_SECONDS = 30.0
@@ -78,12 +75,6 @@ def require_free_port(host: str, port: int) -> None:
             ) from exc
 
 
-def find_free_port(host: str) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind((host, 0))
-        return int(probe.getsockname()[1])
-
-
 def wait_for_tunnel_url(lines: Queue[str | None], *, timeout_seconds: float) -> str:
     """Read cloudflared output lines from `lines` until a tunnel URL appears or time runs out.
 
@@ -115,7 +106,6 @@ def wait_for_tunnel_url(lines: Queue[str | None], *, timeout_seconds: float) -> 
 def build_app(*, api_key: str) -> FastAPI:
     app = create_app(api_key=api_key)
     mount_reference_client(app, static_dir=STATIC_DIR)
-    mount_frontend_client(app, frontend_dist_dir=FRONTEND_DIST_DIR)
     return app
 
 
@@ -156,83 +146,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
-        "--auto-port",
-        action="store_true",
-        help="Choose another free port when the requested port is occupied.",
-    )
-    parser.add_argument(
         "--api-key",
         default=os.environ.get("BLINDSIGHT_API_KEY"),
-        help="Shared key the local server requires. Prompts when omitted.",
-    )
-    parser.add_argument(
-        "--generate-api-key",
-        action="store_true",
-        help="Generate and print a temporary key instead of prompting for one.",
-    )
-    parser.add_argument(
-        "--no-tunnel",
-        action="store_true",
-        help="Serve only on this computer instead of opening a Cloudflare quick tunnel.",
+        help="Shared key the local server requires. Defaults to $BLINDSIGHT_API_KEY.",
     )
     parser.add_argument("--tunnel-timeout-seconds", type=float, default=DEFAULT_TUNNEL_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
 
-    generated_api_key = False
-    if args.generate_api_key:
-        args.api_key = secrets.token_urlsafe(24)
-        generated_api_key = True
-    elif not args.api_key:
-        try:
-            args.api_key = getpass.getpass(
-                "Choose a temporary API key (enter the same key in BlindSight Settings): "
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            print("An API key is required.", file=sys.stderr)
-            return 1
-        if not args.api_key:
-            print("An API key is required.", file=sys.stderr)
-            return 1
+    if not args.api_key:
+        print(
+            "An API key is required: pass --api-key or set BLINDSIGHT_API_KEY.",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
-        try:
-            require_free_port(args.host, args.port)
-        except PortOccupiedError:
-            if not args.auto_port:
-                raise
-            previous_port = args.port
-            args.port = find_free_port(args.host)
-            print(f"Port {previous_port} is busy; using port {args.port} instead.")
-        cloudflared_path = None
-        if not args.no_tunnel:
-            cloudflared_path = require_tool(
-                "cloudflared",
-                hint=(
-                    "Install it from https://developers.cloudflare.com/cloudflared/downloads/ "
-                    "(or `winget install cloudflare.cloudflared`), then try again."
-                ),
-            )
+        cloudflared_path = require_tool(
+            "cloudflared",
+            hint=(
+                "Install it from https://developers.cloudflare.com/cloudflared/downloads/ "
+                "(or `winget install cloudflare.cloudflared`), then try again."
+            ),
+        )
+        require_free_port(args.host, args.port)
     except LauncherError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
     app = build_app(api_key=args.api_key)
     server, server_thread = _run_server(app, args.host, args.port)
-    if args.no_tunnel:
-        print(f"BlindSight is available on this computer at: http://{args.host}:{args.port}")
-        if generated_api_key:
-            print(f"Temporary API key for BlindSight Settings: {args.api_key}")
-        print("Press Ctrl+C to stop the server.")
-        try:
-            while server_thread.is_alive():
-                server_thread.join(timeout=0.5)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.should_exit = True  # type: ignore[attr-defined]
-        return 0
-
-    assert cloudflared_path is not None
     tunnel_process, tunnel_lines = _start_cloudflared(cloudflared_path, args.port)
 
     try:
@@ -243,8 +185,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"BlindSight is reachable from a phone at: {tunnel_url}")
-    if generated_api_key:
-        print(f"Temporary API key for BlindSight Settings: {args.api_key}")
     print(f"Local server: http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop both the server and the tunnel.")
 
