@@ -390,6 +390,101 @@ class GeminiAdapter:
         return _parse_attempt(self.name, self.model, attempt, raw_text, usage)
 
 
+class GeminiSceneCardAnswerAdapter:
+    """Stage 1 answering via Gemini: card-grounded answers and captured-view re-checks.
+
+    Gemini ingests the captured view directly as base64 (no published media URL), so a single
+    adapter serves both the card-first and captured-view roles. The card-first path sends only
+    the scene card and conversation; the captured-view path prepends the video evidence.
+    """
+
+    name = "gemini"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
+        client: Any | None = None,
+    ) -> None:
+        self.model = model or os.environ.get("BLINDSIGHT_GEMINI_MODEL", "gemini-3.7-flash")
+        self.timeout_seconds = timeout_seconds or float(
+            os.environ.get("BLINDSIGHT_GEMINI_TIMEOUT_SECONDS", "40")
+        )
+        if client is not None:
+            self.client = client
+            return
+        key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY is required for answers.")
+        from google import genai
+        from google.genai import types
+
+        self.client = genai.Client(
+            api_key=key,
+            http_options=types.HttpOptions(timeout=int(self.timeout_seconds * 1000)),
+        )
+
+    def _build_card_input(self, prompt: str, card_body: dict[str, Any], conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt.removesuffix("{")},
+            {"type": "text", "text": f"Scene card:\n{json.dumps(card_body)}"},
+        ]
+        parts.extend({"type": "text", "text": turn["content"]} for turn in conversation)
+        return parts
+
+    def _build_view_input(self, prompt: str, evidence: CaptureEvidence, conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = [
+            {"type": "text", "text": prompt.removesuffix("{")},
+            {
+                "type": "video",
+                "data": base64.b64encode(evidence.content).decode("ascii"),
+                "mime_type": evidence.media_type,
+            },
+        ]
+        parts.extend({"type": "text", "text": turn["content"]} for turn in conversation)
+        return parts
+
+    def answer(self, source, conversation: list[dict[str, Any]]) -> QuestionAnswer:
+        if isinstance(source, CaptureEvidence):
+            prompt = build_captured_view_prompt()
+            parts = self._build_view_input(prompt, source, conversation)
+        else:
+            prompt = build_card_answer_prompt()
+            parts = self._build_card_input(prompt, source, conversation)
+        return self._answer(prompt, parts)
+
+    def _answer(self, prompt: str, parts: list[dict[str, Any]]) -> QuestionAnswer:
+        try:
+            response = self.client.interactions.create(
+                model=self.model,
+                input=parts,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": AnswerBody.model_json_schema(),
+                },
+            )
+        except Exception as exc:
+            kind: FailureKind = "timeout" if _is_timeout(exc) else "transport"
+            return QuestionAnswer(
+                answer=None,
+                failure_kind=kind,
+                error=str(exc),
+                provider=self.name,
+                model=self.model,
+                usage={"timeout_seconds": self.timeout_seconds, "schema_mode": "response_schema"},
+            )
+
+        raw_text = (getattr(response, "output_text", None) or "").strip()
+        usage: dict[str, Any] = _native_usage(
+            getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
+        )
+        usage.update({"timeout_seconds": self.timeout_seconds, "schema_mode": "response_schema"})
+        return _parse_answer(self.name, self.model, raw_text, usage)
+
+
 class RekaCardAnswerAdapter:
     """Stage 1 card-first answering, using the same Reka Chat endpoint as scene-card generation."""
 

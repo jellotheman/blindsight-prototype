@@ -109,23 +109,17 @@ def web():
     from blindsight.media_urls import ModalMediaUrlStore
     from blindsight.providers import (
         GeminiAdapter,
-        ProductionProvider,
-        RekaCapturedViewAdapter,
-        RekaCardAnswerAdapter,
-        RekaChatAdapter,
+        GeminiSceneCardAnswerAdapter,
+        SingleProvider,
     )
     from blindsight.storage import ModalCaptureStore
     from blindsight.transitions import ModalTransitionAdapter, ModalTransitionSessionStore
 
-    public_base_url = os.environ.get("BLINDSIGHT_PUBLIC_BASE_URL") or web.get_web_url()
+    public_base_url = os.environ.get("BLINDSIGHT_PUBLIC_BASE_URL")
     if not public_base_url:
         raise RuntimeError("The deployed web URL is required for provider media transport.")
     media_urls = ModalMediaUrlStore(capture_state, public_base_url)
-    provider = ProductionProvider(
-        reka=RekaChatAdapter(),
-        gemini=GeminiAdapter(),
-        media_urls=media_urls,
-    )
+    provider = SingleProvider(GeminiAdapter())
 
     manifest_path = resolve_manifest_path(
         [
@@ -143,8 +137,8 @@ def web():
         processing_deadline_seconds=float(
             os.environ.get("BLINDSIGHT_PROCESSING_DEADLINE_SECONDS", "90")
         ),
-        card_provider=RekaCardAnswerAdapter(),
-        captured_view_provider=RekaCapturedViewAdapter(media_urls=media_urls),
+        card_provider=GeminiSceneCardAnswerAdapter(),
+        captured_view_provider=GeminiSceneCardAnswerAdapter(),
         question_processing_deadline_seconds=float(
             os.environ.get("BLINDSIGHT_QUESTION_PROCESSING_DEADLINE_SECONDS", "60")
         ),
