@@ -14,6 +14,18 @@ Add a row here whenever you deliberately checkpoint a working state, with the co
 one-line reason. Find the latest good commit yourself with `git log --oneline` if this table is
 stale — it is a pointer, not the source of truth.
 
+The `4268db9` state is also checked out as a standing worktree, so a working copy stays on disk
+even while `main` is mid-surgery:
+
+| Path | Branch |
+| --- | --- |
+| `../blindsight-checkpoint-2026-08-31` | `checkpoint/working-2026-08-31` |
+
+Leave that worktree alone rather than developing in it — its only job is to still be there when
+something else breaks. It is a fresh checkout, so it has no `.venv` and no installed package;
+run `pip install -e ".[dev]"` inside it before running anything from there. Remove it with
+`git worktree remove ../blindsight-checkpoint-2026-08-31` when it has outlived its usefulness.
+
 ## Local working tree
 
 If uncommitted changes leave the app broken, first check what you'd lose:
