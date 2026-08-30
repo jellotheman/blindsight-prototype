@@ -104,7 +104,6 @@ def web():
     from blindsight.app import create_app, mount_reference_client
     from blindsight.evidence import FileEvidenceStore
     from blindsight.excerpts import resolve_manifest_path
-    from blindsight.media_urls import ModalMediaUrlStore
     from blindsight.providers import (
         GeminiAdapter,
         GeminiSceneCardAnswerAdapter,
@@ -113,10 +112,9 @@ def web():
     from blindsight.storage import ModalCaptureStore
     from blindsight.transitions import ModalTransitionAdapter, ModalTransitionSessionStore
 
-    public_base_url = os.environ.get("BLINDSIGHT_PUBLIC_BASE_URL")
-    if not public_base_url:
-        raise RuntimeError("The deployed web URL is required for provider media transport.")
-    media_urls = ModalMediaUrlStore(capture_state, public_base_url)
+    # Gemini ingests captured video directly as base64 and never publishes a provider-media
+    # URL (see SingleProvider.describe and GeminiSceneCardAnswerAdapter's docstring), so no
+    # public base URL is required now that Reka is no longer in the loop.
     provider = SingleProvider(GeminiAdapter())
 
     manifest_path = resolve_manifest_path(
@@ -130,7 +128,6 @@ def web():
         manifest_path=manifest_path,
         store=ModalCaptureStore(capture_state),
         provider=provider,
-        media_urls=media_urls,
         evidence_store=FileEvidenceStore(Path("/evidence/runs"), flush=evidence_volume.commit),
         processing_deadline_seconds=float(
             os.environ.get("BLINDSIGHT_PROCESSING_DEADLINE_SECONDS", "90")
