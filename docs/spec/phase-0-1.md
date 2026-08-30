@@ -236,8 +236,10 @@ already spoke. Retained evidence is unaffected.
   `response_format: {"type": "json_schema", ...}` (undocumented but supported; see Provider and
   network facts). Send no assistant prefill: combining one with any `response_format` corrupts
   Reka's output. Validate the completed response with the sole scene-card validator.
-- Allow two Reka parse attempts. After two malformed or schema-invalid results, invoke the Gemini
-  fallback using its verified response-schema support.
+- Allow two Reka attempts. When both attempts end in malformed or schema-invalid results *or* in
+  transport or timeout failures, invoke the Gemini fallback once using its verified response-schema
+  support. A transport or timeout failure consumes a Reka attempt; it never grants Reka more
+  attempts or skips the fallback.
 - Treat provider transport errors and timeouts separately from parse failures. Retry policy must be
   bounded and visible in retained evidence.
 - Use Gemini as the measured fallback, not as a silent second opinion. Record which provider and
@@ -344,7 +346,7 @@ Good tests assert externally visible behavior:
 - capture completion returns before inference finishes;
 - polling survives different application/container instances sharing one store;
 - valid model output becomes one canonical scene card;
-- two invalid Reka parses invoke Gemini exactly once;
+- two failed Reka attempts -- invalid output, transport, or timeout -- invoke Gemini exactly once;
 - provider timeout, transport failure, and invalid output remain distinct;
 - uncertainty null/array semantics and claim anchoring are enforced;
 - a new capture creates a new scene session;
@@ -375,8 +377,8 @@ shapes.
   asynchronously, and returns a valid scene card.
 - A preloaded excerpt is runtime-selectable and returns the same scene-card schema through the same
   capture resource.
-- Reka output is accepted only after canonical validation; two invalid results fall through to
-  Gemini.
+- Reka output is accepted only after canonical validation; failed Reka attempts -- invalid output,
+  transport, or timeout -- fall through to Gemini exactly once.
 - The accepted card obeys null/empty semantics, claim-specific uncertainty, visual-impression
   limits, and the 50-word overview maximum.
 - Job state survives POST and GET requests landing on different containers.

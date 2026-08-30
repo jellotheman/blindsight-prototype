@@ -133,7 +133,11 @@ class DeterministicProvider:
 
 
 class ProductionProvider:
-    """Exactly two invalid Reka outputs, then exactly one schema-constrained Gemini fallback."""
+    """Two Reka attempts, then exactly one schema-constrained Gemini fallback.
+
+    Every failure kind (invalid output, transport, timeout) consumes a Reka attempt and
+    falls through to the fallback; nothing grants Reka extra attempts.
+    """
 
     def __init__(
         self,
@@ -168,8 +172,6 @@ class ProductionProvider:
                 attempts.append(attempt)
                 if attempt.card_body is not None:
                     return _selected(attempt, attempts, prompt=prompt)
-                if attempt.failure_kind != "invalid_output":
-                    return _failed(attempt, attempts, prompt=prompt)
         finally:
             self.media_urls.revoke(media_url)
 

@@ -235,13 +235,14 @@ def test_live_produces_validated_cards() -> None:
     assert 0.0 <= validated_card_rate <= 1.0
 
 
-def test_live_transport_failure_fails_the_capture() -> None:
-    """A dead media URL is a transport failure: the capture fails and Gemini is never invoked.
+def test_live_transport_failure_falls_through_to_gemini() -> None:
+    """A dead media URL is a Reka transport failure that still reaches the Gemini fallback.
 
-    ProductionProvider treats transport/timeout differently from invalid_output (providers.py):
-    invalid output gets two Reka attempts and then one Gemini fallback; a transport failure
-    short-circuits immediately as a failed capture. This smoke run checks that behavior against
-    Reka's real API, which may surface the dead URL as either.
+    ProductionProvider lets every failure kind (invalid_output, transport, timeout) consume a
+    Reka attempt and fall through to the single Gemini fallback (providers.py). Reka's real API
+    may surface the dead URL as any of those kinds; either way both Reka attempts are consumed
+    and Gemini is invoked exactly once with the real inline clip. Whether Gemini then succeeds
+    depends on Reka's live error shape, so only the bounded attempt structure is asserted.
     """
     provider = ProductionProvider(
         reka=RekaChatAdapter(),
@@ -252,7 +253,10 @@ def test_live_transport_failure_fails_the_capture() -> None:
 
     result = provider.describe(CaptureEvidence(content=clip.content, media_type=clip.media_type))
 
-    assert result.card_body is None
-    assert result.failure_kind in {"transport", "timeout"}
-    assert [attempt.provider for attempt in result.attempts] == ["reka"]
-    assert result.attempts[0].failure_kind in {"transport", "timeout"}
+    providers = [attempt.provider for attempt in result.attempts]
+    assert providers == ["reka", "reka", "gemini"]
+    assert result.attempts[0].failure_kind in {"transport", "timeout", "invalid_output"}
+    if result.card_body is not None:
+        assert result.provider == "gemini"
+    else:
+        assert result.failure_kind in {"transport", "timeout", "invalid_output"}

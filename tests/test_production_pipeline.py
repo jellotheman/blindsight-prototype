@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from blindsight.app import create_app
@@ -73,6 +74,26 @@ def valid(provider: str, attempt: int) -> ProviderAttempt:
     )
 
 
+def transport(provider: str, attempt: int, error: str) -> ProviderAttempt:
+    return ProviderAttempt(
+        provider=provider,
+        model=f"{provider}-model",
+        attempt=attempt,
+        failure_kind="transport",
+        error=error,
+    )
+
+
+def timeout(provider: str, attempt: int, error: str) -> ProviderAttempt:
+    return ProviderAttempt(
+        provider=provider,
+        model=f"{provider}-model",
+        attempt=attempt,
+        failure_kind="timeout",
+        error=error,
+    )
+
+
 def test_two_invalid_reka_attempts_fall_through_to_one_recorded_gemini_call(
     tmp_path: Path, api_key: str, auth_headers: dict[str, str]
 ) -> None:
@@ -123,18 +144,85 @@ def test_two_invalid_reka_attempts_fall_through_to_one_recorded_gemini_call(
     assert (tmp_path / "runs" / settled["capture_id"] / "card.json").exists()
 
 
-def test_provider_transport_failure_does_not_masquerade_as_invalid_output(
+def test_two_transport_reka_attempts_fall_through_to_one_recorded_gemini_call(
     tmp_path: Path, api_key: str, auth_headers: dict[str, str]
 ) -> None:
-    transport = ProviderAttempt(
-        provider="reka",
-        model="reka-flash",
-        attempt=1,
-        failure_kind="transport",
-        error="upstream unavailable",
+    reka = ScriptedAdapter(
+        "reka",
+        "reka-flash",
+        [
+            transport("reka", 1, "upstream 400"),
+            transport("reka", 2, "upstream 400"),
+        ],
     )
-    reka = ScriptedAdapter("reka", "reka-flash", [transport])
-    gemini = ScriptedAdapter("gemini", "gemini-3.7-flash", [])
+    gemini = ScriptedAdapter("gemini", "gemini-3.7-flash", [valid("gemini", 1)])
+    media_urls = MemoryMediaUrlStore("https://testserver")
+    provider = ProductionProvider(reka=reka, gemini=gemini, media_urls=media_urls)
+    evidence = FileEvidenceStore(tmp_path / "runs")
+    client = TestClient(
+        create_app(
+            api_key=api_key,
+            provider=provider,
+            media_validator=AcceptingMediaValidator(),
+            evidence_store=evidence,
+            media_urls=media_urls,
+        )
+    )
+
+    created = client.post(
+        "/v1/captures",
+        headers=auth_headers,
+        json={"source": {"type": "excerpt", "excerpt_id": "via-014-exit-01"}},
+    )
+    settled = wait_for_capture(client, created.headers["location"])
+
+    assert settled["status"] == "succeeded"
+    assert settled["card"]["card"] == VALID_CARD_BODY
+    assert len(reka.calls) == 2, "a transport failure must not grant Reka extra attempts"
+    assert len(gemini.calls) == 1
+
+    run = json.loads((tmp_path / "runs" / settled["capture_id"] / "run.json").read_text())
+    assert [attempt["provider"] for attempt in run["attempts"]] == ["reka", "reka", "gemini"]
+    assert [attempt["failure_kind"] for attempt in run["attempts"]] == [
+        "transport",
+        "transport",
+        None,
+    ]
+    assert run["attempts"][0]["error"] == "upstream 400"
+    assert run["attempts"][2]["timings"]["completed_ms"] <= run["timings"]["completed_ms"]
+    assert run["selection"] == {
+        "provider": "gemini",
+        "model": "gemini-3.7-flash",
+        "attempt": 1,
+    }
+    assert (tmp_path / "runs" / settled["capture_id"] / "card.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("gemini_failure", "gemini_kind", "expected_code"),
+    [
+        (transport, "transport", "PROVIDER_UNAVAILABLE"),
+        (timeout, "timeout", "PROVIDER_TIMEOUT"),
+    ],
+)
+def test_timeout_reka_attempts_fall_through_once_and_gemini_failure_stays_distinct(
+    tmp_path: Path,
+    api_key: str,
+    auth_headers: dict[str, str],
+    gemini_failure,
+    gemini_kind: str,
+    expected_code: str,
+) -> None:
+    reka = ScriptedAdapter(
+        "reka",
+        "reka-flash",
+        [timeout("reka", 1, "deadline exceeded"), timeout("reka", 2, "deadline exceeded")],
+    )
+    gemini = ScriptedAdapter(
+        "gemini",
+        "gemini-3.7-flash",
+        [gemini_failure("gemini", 1, "fallback also failed")],
+    )
     provider = ProductionProvider(
         reka=reka,
         gemini=gemini,
@@ -157,8 +245,18 @@ def test_provider_transport_failure_does_not_masquerade_as_invalid_output(
     settled = wait_for_capture(client, created.headers["location"])
 
     assert settled["status"] == "failed"
-    assert settled["failure"]["code"] == "PROVIDER_UNAVAILABLE"
-    assert len(gemini.calls) == 0
+    assert len(reka.calls) == 2
+    assert len(gemini.calls) == 1, "the fallback runs exactly once even after transport failures"
+    assert settled["failure"]["code"] == expected_code
+    assert settled["failure"]["retryable"] is True
+    run = json.loads((tmp_path / "runs" / settled["capture_id"] / "run.json").read_text())
+    assert [attempt["provider"] for attempt in run["attempts"]] == ["reka", "reka", "gemini"]
+    assert [attempt["failure_kind"] for attempt in run["attempts"]] == [
+        "timeout",
+        "timeout",
+        gemini_kind,
+    ]
+    assert run["selection"] is None
 
 
 def test_overall_deadline_settles_a_wedged_provider_as_timeout(
