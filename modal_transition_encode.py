@@ -444,6 +444,7 @@ def main(
     batch_size: int = 4,
     max_gpu_seconds: float = 0.0,
     max_retained_bytes: int = 0,
+    clip_ids: str = "",
 ) -> None:
     if action == "plan":
         result = plan_corpus_encoding.remote(manifest_name, corpus, window_config)  # type: ignore[arg-type]
@@ -458,6 +459,16 @@ def main(
         )
     elif action == "ensure-checkpoint":
         result = ensure_checkpoint_cached.remote()
+    elif action == "encode-clips":
+        # CLI-only convenience wrapper around encode_clip_batch: the CLI cannot parse a bare
+        # list[str] parameter, so this takes a comma-separated string instead and splits it here.
+        # This exists so a small, verifiable real encode can be run as one literal `modal run`
+        # command (see docs/spec/phase-3-transition.md's "verify one clip before a large plan"
+        # convention) without inventing a second code path for the actual encode logic.
+        parsed_clip_ids = [value for value in clip_ids.split(",") if value]
+        if not parsed_clip_ids:
+            raise ValueError("action=encode-clips requires --clip-ids as a comma-separated list.")
+        result = encode_clip_batch.remote(manifest_name, corpus, window_config, parsed_clip_ids)  # type: ignore[arg-type]
     else:
         raise ValueError(f"Unknown action {action!r}.")
     print(json.dumps(result, indent=2, sort_keys=True))
