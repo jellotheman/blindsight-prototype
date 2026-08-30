@@ -20,12 +20,15 @@ from blindsight.transition.features import WORLD_STATE_DIM
 from train_transition_detector import (
     CachedClip,
     ClipFeatures,
+    ManifestClipRef,
+    cache_file_pairs_for_clip,
     cache_paths_for_clip,
     compute_group_average_precisions,
     evaluate_at_fixed_policy,
     label_cached_clip,
     load_cached_clip,
     load_manifest_clips,
+    load_split_clip_features,
     run,
     sanitize_clip_id,
     stack_gru_rows,
@@ -34,15 +37,17 @@ from train_transition_detector import (
 
 
 def test_sanitize_clip_id_replaces_unsafe_characters() -> None:
-    assert sanitize_clip_id("abc/def:ghi") == "abc_def_ghi"
+    # Must match blindsight/transition/encode.py's sanitize_identifier exactly: unsafe characters
+    # become "-", not "_" -- the two pipelines write and read the same cache directory.
+    assert sanitize_clip_id("abc/def:ghi") == "abc-def-ghi"
     assert sanitize_clip_id("already-safe_123.mp4") == "already-safe_123.mp4"
 
 
 def test_cache_paths_for_clip_matches_the_shared_contract_layout(tmp_path: Path) -> None:
     npz_path, json_path = cache_paths_for_clip(tmp_path, "ego4d-only-v1", "ego4d", "abc/def", "short")
 
-    assert npz_path == tmp_path / "world-states" / "ego4d-only-v1" / "ego4d" / "abc_def__short.npz"
-    assert json_path == tmp_path / "world-states" / "ego4d-only-v1" / "ego4d" / "abc_def__short.json"
+    assert npz_path == tmp_path / "world-states" / "ego4d-only-v1" / "ego4d" / "abc-def__short.npz"
+    assert json_path == tmp_path / "world-states" / "ego4d-only-v1" / "ego4d" / "abc-def__short.json"
 
 
 def _write_cache_pair(
@@ -125,6 +130,90 @@ def test_load_cached_clip_rejects_mismatched_shapes(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         load_cached_clip(npz_path, json_path)
+
+
+def test_cache_file_pairs_for_clip_discovers_boundary_split_training_files(tmp_path: Path) -> None:
+    # blindsight/transition/encode.py's plan_extraction_work_items gives a training clip with
+    # multiple far-apart boundaries one file per boundary window (`<clip>__boundary<N>__<config>`),
+    # never one whole-clip file. A loader that only checks the whole-clip name (the heldout/test
+    # layout) would find nothing for every real training clip -- this is the regression this guards.
+    directory = tmp_path / "world-states" / "test-manifest" / "ego4d"
+    for index in range(3):
+        _write_cache_pair(
+            directory,
+            corpus="ego4d",
+            source_video_id="video-1",
+            clip_id="clip-1",
+            split="train",
+            window_config="short",
+            manifest_name="test-manifest",
+            world_states=np.zeros((4, WORLD_STATE_DIM)),
+            timestamps=np.arange(4, dtype=np.float64),
+            range_start_seconds=float(index * 100),
+        )
+        # _write_cache_pair always names the file as the whole-clip layout; rename to the real
+        # boundary-window layout encode.py actually produces so this test exercises real filenames.
+        whole_npz = directory / "clip-1__short.npz"
+        whole_json = directory / "clip-1__short.json"
+        whole_npz.rename(directory / f"clip-1__boundary{index}__short.npz")
+        whole_json.rename(directory / f"clip-1__boundary{index}__short.json")
+
+    pairs = cache_file_pairs_for_clip(tmp_path, "test-manifest", "ego4d", "clip-1", "short")
+
+    assert len(pairs) == 3
+    assert [npz.name for npz, _ in pairs] == [
+        "clip-1__boundary0__short.npz",
+        "clip-1__boundary1__short.npz",
+        "clip-1__boundary2__short.npz",
+    ]
+
+
+def test_load_split_clip_features_loads_every_boundary_window_for_a_training_clip(tmp_path: Path) -> None:
+    directory = tmp_path / "world-states" / "test-manifest" / "ego4d"
+    for index in range(2):
+        _write_cache_pair(
+            directory,
+            corpus="ego4d",
+            source_video_id="video-1",
+            clip_id="clip-1",
+            split="train",
+            window_config="short",
+            manifest_name="test-manifest",
+            world_states=np.zeros((4, WORLD_STATE_DIM)),
+            timestamps=np.arange(4, dtype=np.float64),
+            range_start_seconds=float(index * 100),
+        )
+        (directory / "clip-1__short.npz").rename(directory / f"clip-1__boundary{index}__short.npz")
+        (directory / "clip-1__short.json").rename(directory / f"clip-1__boundary{index}__short.json")
+    # A heldout clip keeps the plain whole-clip layout.
+    _write_cache_pair(
+        directory,
+        corpus="ego4d",
+        source_video_id="video-2",
+        clip_id="clip-2",
+        split="heldout",
+        window_config="short",
+        manifest_name="test-manifest",
+        world_states=np.zeros((4, WORLD_STATE_DIM)),
+        timestamps=np.arange(4, dtype=np.float64),
+    )
+    manifest_clips = [
+        ManifestClipRef(corpus="ego4d", source_video_id="video-1", clip_id="clip-1", split="train"),
+        ManifestClipRef(corpus="ego4d", source_video_id="video-2", clip_id="clip-2", split="heldout"),
+    ]
+
+    loaded, missing = load_split_clip_features(
+        manifest_clips,
+        "train",
+        cache_root=tmp_path,
+        manifest_name="test-manifest",
+        window_config="short",
+        intervals=[],
+        boundaries=[],
+    )
+
+    assert missing == []
+    assert len(loaded) == 2  # both boundary-window files for clip-1, none of clip-2's
 
 
 def test_label_cached_clip_shifts_into_the_clips_absolute_time_frame() -> None:

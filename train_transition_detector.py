@@ -88,7 +88,7 @@ def sanitize_clip_id(clip_id: str) -> str:
     described in the shared cache-format contract.
     """
 
-    return _UNSAFE_CLIP_ID_CHARS.sub("_", clip_id)
+    return _UNSAFE_CLIP_ID_CHARS.sub("-", clip_id)
 
 
 def cache_paths_for_clip(
@@ -96,11 +96,42 @@ def cache_paths_for_clip(
 ) -> tuple[Path, Path]:
     """Return the ``(npz_path, json_path)`` pair for one ``(clip, window_config)`` per the contract:
     ``world-states/<manifest_name>/<corpus>/<clip_id-sanitized>__<window_config>.npz`` (+ ``.json``).
+
+    This is the whole-clip layout the encoding pipeline uses for ``heldout``/``test`` clips. A
+    ``train`` clip can instead be split across several disjoint boundary-window files (see
+    ``cache_file_pairs_for_clip``); this function does not discover those.
     """
 
     directory = cache_root / "world-states" / manifest_name / corpus
     stem = f"{sanitize_clip_id(clip_id)}__{window_config}"
     return directory / f"{stem}.npz", directory / f"{stem}.json"
+
+
+def cache_file_pairs_for_clip(
+    cache_root: Path, manifest_name: str, corpus: str, clip_id: str, window_config: str
+) -> list[tuple[Path, Path]]:
+    """Return every ``(npz_path, json_path)`` cache pair the encoding pipeline wrote for this clip.
+
+    ``blindsight/transition/encode.py``'s ``plan_extraction_work_items`` gives a ``heldout``/``test``
+    clip exactly one whole-clip file (``<clip>__<window_config>.npz``, the layout
+    ``cache_paths_for_clip`` checks), but a ``train`` clip one or more disjoint boundary-window files
+    named ``<clip>__boundary<index>__<window_config>.npz`` — the boundary-only encoding strategy from
+    the spec's "Compute cost" section. Both layouts can exist on disk; this checks for both rather
+    than assuming one, and never merges results across pairs (each covers an independent time range,
+    so features/labels are built per pair, never bridging the gap between two boundary windows).
+    """
+
+    directory = cache_root / "world-states" / manifest_name / corpus
+    sanitized = sanitize_clip_id(clip_id)
+    pairs: list[tuple[Path, Path]] = []
+    whole_npz, whole_json = cache_paths_for_clip(cache_root, manifest_name, corpus, clip_id, window_config)
+    if whole_npz.exists() and whole_json.exists():
+        pairs.append((whole_npz, whole_json))
+    for npz_path in sorted(directory.glob(f"{sanitized}__boundary*__{window_config}.npz")):
+        json_path = npz_path.with_suffix(".json")
+        if json_path.exists():
+            pairs.append((npz_path, json_path))
+    return pairs
 
 
 @dataclass(frozen=True)
@@ -229,11 +260,12 @@ def load_split_clip_features(
     for ref in manifest_clips:
         if ref.split != split:
             continue
-        npz_path, json_path = cache_paths_for_clip(cache_root, manifest_name, ref.corpus, ref.clip_id, window_config)
-        if not npz_path.exists() or not json_path.exists():
+        pairs = cache_file_pairs_for_clip(cache_root, manifest_name, ref.corpus, ref.clip_id, window_config)
+        if not pairs:
             missing.append(ref.clip_id)
             continue
-        loaded.append(build_clip_features(npz_path, json_path, intervals, boundaries))
+        for npz_path, json_path in pairs:
+            loaded.append(build_clip_features(npz_path, json_path, intervals, boundaries))
     return loaded, missing
 
 
