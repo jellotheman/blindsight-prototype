@@ -47,8 +47,9 @@ measurements. Do not repeat them.
 Item 6 is the reason to build a trained detector. Items 1 to 5 are the reason not to build another
 unsupervised score.
 
-The archived measurements used the HouseTours corpus. This specification uses the Ego4D corpus. The
-values above therefore give the shape of the problem. They do not give a target for this corpus.
+The archived measurements used only 6 HouseTours clips and 77 boundaries. This specification uses
+two corpora and about 12700 boundaries, and it decides on Ego4D. The values above therefore give the
+shape of the problem. They do not give a target for this work.
 
 ## The causal problem
 
@@ -78,48 +79,90 @@ recurrent detector and for a detection delay budget.
 
 ## Corpus
 
-The corpus is the Ego4D room-prediction annotation set. The EgoEnv authors published it. The file
-`egoenv-annotations.zip` holds it. The annotations are on disk. The video files are not on disk.
+The system trains on two corpora and reports one deciding result. The EgoEnv authors published room
+annotations for both. The file `egoenv-annotations.zip` holds both label sets. The annotations are on
+disk. No video file is on disk.
 
-| Property                     | Value   |
-| ---------------------------- | ------- |
-| Room-visit intervals         | 8681    |
-| Distinct clips               | 644     |
-| Distinct videos              | 406     |
-| Usable room-change boundaries | 6478   |
-| Annotated duration           | 176.9 h |
-| Mean boundaries per clip     | 10.06   |
-| Zero-length interval rows    | 2       |
+| Property                      | Ego4D   | HouseTours |
+| ----------------------------- | ------- | ---------- |
+| Room-visit intervals          | 8681    | 7608       |
+| Distinct clips                | 644     | 1152       |
+| Distinct source videos        | 406     | 894        |
+| Usable room-change boundaries | 6478    | 6283       |
+| Annotated duration            | 176.9 h | 24.8 h     |
+| Mean boundaries for each clip | 10.06   | 5.45       |
+| Zero-length interval rows     | 2       | 233        |
+| Indoor-to-indoor share        | 89.3 %  | 76.9 %     |
 
-The boundary families are as follows. Indoor-to-indoor is 5784 boundaries, or 89.3 percent.
-Threshold-cross is 468 boundaries. Indoor-to-outdoor is 175 boundaries. Outdoor-to-outdoor is 51
-boundaries.
+The Ego4D boundary families are as follows. Indoor-to-indoor is 5784 boundaries. Threshold-cross is
+468 boundaries. Indoor-to-outdoor is 175 boundaries. Outdoor-to-outdoor is 51 boundaries.
 
 The indoor-to-indoor share is high. This is correct for this specification. Indoor-to-indoor is the
 family that the archived effort failed to detect.
 
-Ego4D video is head-worn video. This matches the BlindSight camera position. The HouseTours corpus
-is video of house tours from a video website. That video is steady and well lit. It does not match
-the BlindSight camera position.
+### Why the system uses both
 
-The label vocabulary holds 20 labels. Nineteen labels also appear in HouseTours. One label is new:
-`recreation_room (billiards room / play room)`. The label-to-zone map therefore needs one addition.
+Each corpus is strong where the other is weak.
+
+Ego4D video is head-worn video. This matches the BlindSight camera position. Ego4D also holds seven
+times the annotated duration, twice the boundary density, and almost no corrupt rows.
+
+HouseTours holds more distinct environments. One HouseTours video shows one house, so 894 videos
+give about 894 environments. One Ego4D video is one recording session from one camera wearer, and
+one wearer can record many hours in one home. The count of Ego4D environments is therefore not more
+than 406 and is probably much less.
+
+The archived effort failed across environments and not across time. A detector reached 0.962 on one
+clip and 0.622 on six unseen buildings. The count of environments is therefore the axis that decides
+generalization. HouseTours supplies that count. Ego4D supplies the domain.
+
+The union holds about 12700 boundaries across about 1300 environments. Neither corpus gives both.
+
+### Which result decides
+
+**Held-out Ego4D clips give the result that decides.** Ego4D matches the deployment domain, so a
+number from Ego4D is a number about the product.
+
+**Held-out HouseTours clips give a second generalization check.** The implementer reports it
+separately. It never replaces the Ego4D result.
+
+The implementer must also report the Ego4D held-out result for a head that trained on HouseTours
+alone. This measures the domain shift directly. It shows whether the extra environments help or
+whether they only add noise.
+
+### Label sources
+
+Both label sets use the same schema and almost the same vocabulary. Ego4D holds 20 labels and
+HouseTours holds 21. Nineteen labels are shared. Ego4D adds
+`recreation_room (billiards room / play room)`. The label-to-zone map must hold the union of both.
+
+Ego4D rows carry a `video_uid` and a `clip_uid`. HouseTours rows carry only a `clip_uid`, which
+holds a video identifier and a frame range at 2 frames per second. The corpus builder must handle
+both forms.
 
 ### Access
 
-Ego4D video is not on disk. The implementer must obtain it before any other work.
+No video file is on disk. Each corpus needs a different source.
 
-1. Sign the licence at `https://ego4d.dev/request/ego4d`. Approval takes about 48 hours.
-2. AWS credentials arrive by email. Write them to `~/.aws/credentials`. Leave the region blank.
-3. Install the tool with `pip install ego4d`. The documentation does not name a version. The
-   implementer must pin one.
+**HouseTours needs no licence.** The video comes from a public video website. The `clip_uid` holds
+the video identifier and a frame range at 2 frames per second. A download tool such as `yt-dlp`
+fetches it. Some videos are dead, private, or blocked by region. The implementer must request more
+clips than the target count and must record which identifiers succeeded.
 
-**The credentials expire after 14 days.** The implementer must complete the download inside that
-window. Re-registration at the same page returns new credentials immediately. A `403 Forbidden`
-result on `HeadObject` almost always means that the credentials expired.
+**Ego4D needs a signed licence.** The licence is already signed and the credentials already exist as
+the Modal secret `blindsight-ego4d-aws`. The secret was created on 2026-08-30. The approval wait of
+about 48 hours is therefore not on the critical path.
 
-A Modal secret named `blindsight-ego4d-aws` exists. The secret has never been used. The implementer
-must verify it against a real download before the implementer plans a large one.
+**Ego4D credentials expire after 14 days.** The current secret therefore expires at about
+2026-09-13. Re-registration at `https://ego4d.dev/request/ego4d` returns new credentials
+immediately. A `403 Forbidden` result on `HeadObject` almost always means that the credentials
+expired.
+
+The secret has never been used. Provisioned is not the same as working. The implementer must
+download one clip end to end before the implementer plans a large download.
+
+Install the download tool with `pip install ego4d`. The documentation names no version. The
+implementer must pin one.
 
 Ego4D publishes no annotation for a change of place. The `scenarios` field is one flat array of
 strings on the video. It carries no timestamps, so it cannot express a transition. The values are
@@ -154,7 +197,7 @@ the cheapest source that this encoder can use, because preprocessing crops to 38
 
 Ego4D video runs at 30 frames per second. This confirms the `short` window configuration below.
 
-### Labels
+### Label layout in time
 
 The system derives a boundary from two adjacent room-visit intervals with different labels. The
 system sorts the intervals of a clip by start time before it makes pairs. Some clips list intervals
@@ -170,8 +213,9 @@ The system assigns a label to every time step at the emission rate.
 The system does not sample discrete negative events. The deployed detector scores every time step.
 The measured false-trigger rate must therefore come from every time step.
 
-Ego4D has no reviewed hard-negative set. The HouseTours corpus had 84 hard-negative ranges that a
-person reviewed. Those ranges do not apply to Ego4D. This is a known gap. See Open risks.
+Neither corpus has a reviewed hard-negative set at this scale. An archived effort reviewed 84
+hard-negative ranges by hand, but those ranges cover only 6 HouseTours clips. Every other negative
+comes from the room intervals alone. This is a known gap. See Open risks.
 
 ## World state extraction
 
@@ -212,9 +256,18 @@ FlashAttention, and uint8 frame transfer. There is no further large saving in th
 
 Full-corpus encoding costs about 53 GPU-hours for one configuration. This is too expensive.
 
-Ego4D clips are long. The mean clip is about 16.5 minutes and holds about 10 boundaries. Boundaries
-are therefore about 100 seconds apart. The system must encode a window of video around each boundary
-instead of the full clip. This reduces the cost by about one order of magnitude.
+The two corpora need different strategies, because their clips differ in length.
+
+**Ego4D: encode a window around each boundary.** The mean clip is about 16.5 minutes and holds about
+10 boundaries, so boundaries sit about 100 seconds apart. A window around each boundary costs about
+one order of magnitude less than the full clip.
+
+**HouseTours: encode the full clip.** The mean clip is about 96 seconds and holds about 5
+boundaries, so boundaries sit about 18 seconds apart. A window around each boundary covers almost
+the whole clip. There is nothing to remove.
+
+**Held-out clips: encode the full clip, always.** The false-trigger rate needs continuous video. A
+set of boundary windows does not hold enough ordinary video.
 
 Download cost and encode cost are different. The tool downloads a whole clip file. The system then
 encodes only the boundary windows inside it. A reduction in encode cost does not reduce the
@@ -225,9 +278,6 @@ CRF 41. CRF 18 is almost visually lossless. A clip can therefore hold more bytes
 than the same span of the parent video. The published figures give about 1.4 GB for each hour of
 full-scale video. Ego4D publishes no figure for the `clips` dataset. The implementer must read the
 real total from the confirmation prompt before the implementer commits to a clip count.
-
-The system must encode the full clip for the held-out evaluation clips. The false-trigger rate needs
-continuous video. A set of boundary windows does not hold enough ordinary video.
 
 The implementer must use parallel Modal containers. A faster single GPU does not solve this. Sixteen
 containers reduce a 2.4 GPU-hour job to about 9 minutes.
@@ -286,6 +336,30 @@ policy updates in constant time.
 
 The two thresholds give hysteresis. The policy does not oscillate near one threshold.
 
+### Why a threshold is acceptable here
+
+A threshold destroyed the archived detector. This specification keeps a threshold. The difference is
+what the threshold measures.
+
+The system must make a sound or stay silent. That choice is binary. A probability alone therefore
+cannot remove the decision. It can only move the decision to a later step.
+
+The archived detector applied a threshold to an uncalibrated novelty value. That value has no fixed
+scale, so a threshold from one building meant something different in another building. The archived
+effort measured this. The usual correction made the result worse: self-normalisation gave a spread
+of 1.87 times against 1.80 times for the raw value.
+
+This detector applies a threshold to a calibrated probability. The calibration fits a slope and a
+bias so that a value of 0.8 means about 80 percent. That meaning holds in a new environment, because
+the calibration made it hold.
+
+The policy is also more than a threshold. It needs two consecutive high scores. It uses a lower
+value to release. It ignores a new event during the cooldown. One noisy time step cannot fire it.
+
+The implementer must fix the threshold on held-out environments. The implementer must then measure
+the false-trigger rate at that fixed threshold on other held-out environments. Threshold transfer is
+therefore a measured property and not an assumption. See Acceptance criteria.
+
 ## Operating point
 
 The implementer fixes these values before training. The implementer does not change them after the
@@ -313,17 +387,35 @@ implementer does not tune the operating point to pass.
 The implementer holds out whole clips. The implementer never splits a clip across the train set and
 the held-out set. Adjacent time steps in one clip are strongly correlated.
 
-The implementer reports the following for each window configuration.
+The implementer holds out a set from each corpus. The implementer selects boundary-dense clips for
+the train set. The implementer selects held-out clips at random. A boundary-dense held-out set
+raises the positive rate. That would make the false-trigger rate wrong.
+
+### Three results
+
+The implementer trains and reports three times. Each run uses both window configurations.
+
+| Run | Train set | Held-out set | Purpose |
+| --- | --------- | ------------ | ------- |
+| A | Ego4D and HouseTours | Ego4D | The result that decides |
+| B | Ego4D and HouseTours | HouseTours | A second generalization check |
+| C | HouseTours only | Ego4D | The measured size of the domain shift |
+
+Run A decides against the kill criterion. Run B shows whether the detector holds on a different
+capture style. Run C shows whether the extra HouseTours environments help the Ego4D result or only
+add noise. Run C also gives the value that a HouseTours-only effort could have reached.
+
+### Reported values
+
+The implementer reports the following for each run and for each window configuration.
 
 - Recall at the false-trigger budget, for the held-out clips.
 - Median detection delay for each detected transition.
 - Recall for each boundary family. Indoor-to-indoor is the family that decides the result.
 - Average precision for the logistic head and for the GRU head.
 - The count of held-out groups that each head wins.
-
-The implementer selects boundary-dense clips for the train set. The implementer selects held-out
-clips at random. A boundary-dense held-out set raises the positive rate. That would make the
-false-trigger rate wrong.
+- The false-trigger rate at the fixed threshold, measured on the held-out clips. This value shows
+  whether the threshold transfers.
 
 ## Artifacts
 
@@ -401,19 +493,23 @@ The proactive-description setting is off by default. The user turns it on.
 
 ## Acceptance criteria
 
-- The Ego4D licence and the AWS credentials work. One clip downloads end to end.
+- The Modal secret `blindsight-ego4d-aws` works. One Ego4D clip downloads end to end.
 - The EgoEnv identifiers resolve against `ego4d.json`. The run manifest records the count that does
   not resolve, and the version that the implementer used.
 - The implementer reads the download size from the confirmation prompt before a large download.
+- The corpus builder reads both label sets and gives one table of boundaries with a corpus column.
 - Every world state uses a trailing window. A test proves that no future frame enters a window.
 - The streaming feature path and the offline feature path give the same values.
 - Both window configurations produce cached world states for the same clip set.
-- The held-out split contains whole clips only.
+- The held-out split contains whole clips only, and holds clips from one corpus only.
 - The selection rule chooses between the two heads without a change to the rule.
+- The implementer fixes the threshold on held-out environments, and then measures the false-trigger
+  rate at that fixed threshold. The report states whether the threshold transferred.
+- The evaluation reports all three runs. Run A gives the result that decides.
 - The evaluation reports recall for each boundary family, and reports indoor-to-indoor separately.
 - The streaming detector accepts one world state at a time and returns a decision.
 - The ONNX export produces the same probability as the PyTorch model, within tolerance.
-- A run manifest names every clip that the run used.
+- A run manifest names every clip that the run used, and names the corpus of each clip.
 - The Stage 0 test suite passes without change.
 
 ## Open risks
@@ -431,8 +527,13 @@ The proactive-description setting is off by default. The user turns it on.
 - **Ego4D video volume.** The annotations sit inside long videos. The download cost is unmeasured.
   Ego4D publishes no size for the `clips` dataset, and CRF 18 encoding can make a clip larger for
   each second than its parent video. The cost could be an order of magnitude above the estimate.
-- **The credentials expire after 14 days.** A download that runs longer than the window fails part
-  way. The implementer must plan for re-registration.
+- **The credentials expire after 14 days.** The current secret dates from 2026-08-30 and therefore
+  expires at about 2026-09-13. A download that starts late fails part way. Re-registration returns
+  new credentials immediately, so this is a delay and not a block.
+- **Two capture styles in one train set.** HouseTours video is steady and Ego4D video is not. A head
+  that trains on the union can learn a feature that separates the two corpora instead of a feature
+  that separates the two classes. Run C exists to detect this. A run A result that is worse than
+  run C means that the union hurt.
 - **Clip coverage is unknown.** The `clips` dataset holds only the clips that a benchmark exported.
   The number of EgoEnv identifiers with no clip file is unmeasured. Those spans need a cut from the
   parent full-scale video, which costs much more to download.
@@ -449,5 +550,8 @@ The proactive-description setting is off by default. The user turns it on.
   attempt at this pipeline. That attempt never ran. This specification keeps its design choices and
   discards its implementation.
 - `housetours_selection.json` is redundant. The annotation CSV files hold the same intervals.
-- The HouseTours annotations remain available. They give 6283 boundaries and need no licence. They
-  are useful to shake out a pipeline. They do not decide the result.
+- HouseTours needs no licence, so it is also the fastest way to shake out the pipeline before an
+  Ego4D download. This is a convenience and not the reason to use it. The reason is the environment
+  count. See ADR-0002.
+- The 6 clips and 77 boundaries of the archived effort are a subset of the HouseTours labels. The
+  full HouseTours set holds 6283 boundaries across 1152 clips.

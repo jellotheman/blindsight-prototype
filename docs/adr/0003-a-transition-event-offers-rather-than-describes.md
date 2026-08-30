@@ -15,15 +15,14 @@ consent the rule: the system decides when something is worth offering, and the u
 to hear it. An unrequested description takes that decision away.
 
 **An automatic description would be poor even when the detector is right.** The user did not look
-around. The camera points wherever the user happens to face, so the resulting scene card describes
-whatever was in front of the lens rather than what the user chose to look at. Stage 0 exists
-precisely because a description grounded in a deliberate captured view is better than one that is
-not.
+around. The camera points wherever the user happens to face. The scene card would therefore describe
+whatever was in front of the lens, and not what the user chose to look at. Stage 0 exists precisely
+because a description grounded in a deliberate captured view is better than one that is not.
 
 **It changes what accuracy the detector needs.** The cost of a false positive falls by roughly two
-orders of magnitude — a wrong earcon spends a second of attention, a wrong description spends
-thirty, plus provider latency and cost. A detector at 0.7 is shippable under this design and would
-not be under the other.
+orders of magnitude. A wrong earcon spends a second of attention. A wrong description spends thirty,
+plus provider latency and cost. A detector at 0.7 is shippable under this design, and would not be
+under the other.
 
 ## Considered options
 
