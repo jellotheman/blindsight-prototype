@@ -15,7 +15,7 @@ BoundaryFamily = Literal[
     "indoor-to-indoor", "threshold-cross", "indoor-to-outdoor", "outdoor-to-outdoor"
 ]
 ResolutionStatus = Literal["clip-file", "parent-cut", "source-video", "unresolved", "failed"]
-SplitName = Literal["train", "heldout", "not-selected", "unresolved", "unavailable"]
+SplitName = Literal["train", "heldout", "test", "not-selected", "unresolved", "unavailable"]
 IGNORE_LABEL = -1
 
 # This is the union of the published EgoEnv room vocabulary.  The zone map is intentionally data,
@@ -246,12 +246,16 @@ def build_frozen_manifest(
     guard_band_seconds: float,
     resolution_by_clip: Mapping[tuple[CorpusName, str], ResolutionStatus],
     resolution_reasons: Mapping[tuple[CorpusName, str], str] | None = None,
+    test_counts: Mapping[CorpusName, int] | None = None,
 ) -> FrozenCorpusManifest:
     """Freeze whole-clip corpus splits before any feature extraction occurs.
 
-    Held-out selection is uniform over eligible clips; training selection is independently sorted by
-    proxy-boundary density. Failed and unresolved identifiers remain visible but cannot silently
-    reduce either selected split.
+    ``heldout`` fixes the decision-policy operating point; the optional, disjoint ``test`` group
+    gives the final threshold-transfer measurement, per the Stage 3 evaluation protocol's rule that
+    the group that fixes the operating point cannot also provide the transfer measurement. Both are
+    uniform-random samples over eligible clips, drawn from one seeded generator so the split is
+    reproducible; training selection is independently sorted by proxy-boundary density. Failed and
+    unresolved identifiers remain visible but cannot silently reduce any selected split.
     """
 
     if guard_band_seconds < 0:
@@ -281,8 +285,17 @@ def build_frozen_manifest(
             raise ValueError(
                 f"Requested {requested_heldout} held-out {corpus} clips, only {len(eligible)} resolve."
             )
-        heldout = set(random.Random(random_seed).sample(eligible, requested_heldout))
-        remaining = [key for key in eligible if key not in heldout]
+        rng = random.Random(random_seed)
+        heldout = set(rng.sample(eligible, requested_heldout))
+        after_heldout = [key for key in eligible if key not in heldout]
+        requested_test = (test_counts or {}).get(corpus, 0)
+        if requested_test > len(after_heldout):
+            raise ValueError(
+                f"Requested {requested_test} test {corpus} clips, only {len(after_heldout)} remain "
+                "after the held-out draw."
+            )
+        test = set(rng.sample(after_heldout, requested_test))
+        remaining = [key for key in after_heldout if key not in test]
         requested_train = train_counts.get(corpus, len(remaining))
         if requested_train > len(remaining):
             raise ValueError(
@@ -299,6 +312,8 @@ def build_frozen_manifest(
                 split_by_key[key] = "unavailable"
             elif key in heldout:
                 split_by_key[key] = "heldout"
+            elif key in test:
+                split_by_key[key] = "test"
             elif key in train:
                 split_by_key[key] = "train"
             else:
@@ -375,7 +390,7 @@ def build_corpus_report(
             "zero_length_rows": sum(item.end_time == item.start_time for item in source_intervals),
             "boundary_families": families,
         }
-        for split in ("train", "heldout", "not-selected", "unresolved", "unavailable"):
+        for split in ("train", "heldout", "test", "not-selected", "unresolved", "unavailable"):
             selected = [clip for clip in manifest.clips if clip.corpus == corpus and clip.split == split]
             if not selected:
                 continue
@@ -441,6 +456,7 @@ def write_frozen_corpus_artifacts(
     specification_counts: Mapping[CorpusName, Mapping[str, int]],
     resolution_reasons: Mapping[tuple[CorpusName, str], str] | None = None,
     difference_explanations: Mapping[tuple[CorpusName, str], str] | None = None,
+    test_counts: Mapping[CorpusName, int] | None = None,
 ) -> tuple[FrozenCorpusManifest, dict[str, object]]:
     """Write the manifest and report together, refusing to alter an existing frozen artifact."""
 
@@ -460,6 +476,7 @@ def write_frozen_corpus_artifacts(
         guard_band_seconds=guard_band_seconds,
         resolution_by_clip=resolution_by_clip,
         resolution_reasons=resolution_reasons,
+        test_counts=test_counts,
     )
     zero_length_rows = sum(item.end_time == item.start_time for item in intervals)
     report = build_corpus_report(

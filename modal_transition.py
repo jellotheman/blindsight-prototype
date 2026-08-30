@@ -368,6 +368,55 @@ def summarize_egoenv_annotations() -> dict[str, object]:
     }
 
 
+@app.function(
+    image=image,
+    secrets=[ego4d_secret],
+    volumes={str(DATA_MOUNT): data_volume},
+    timeout=900,
+)
+def preview_full_ego4d_download(*, data_version: str = "v2_1") -> dict[str, object]:
+    """Preview the complete resolved Ego4D download from the saved resolution plan.
+
+    Reads every parent-cut ``video_540ss`` identifier already recorded by
+    ``resolve_egoenv_identifiers`` and asks the official CLI for the exact total size, declining
+    before any media transfers. This is the size the acceptance criteria require before a large
+    download is approved.
+    """
+
+    plans = DATA_MOUNT / "plans"
+    resolution_path = plans / "ego4d-resolution.json"
+    rows = json.loads(resolution_path.read_text(encoding="utf-8"))
+    video_uids = sorted({row["video_uid"] for row in rows if row["status"] == "parent-cut"})
+    if not video_uids:
+        raise ValueError("No parent-cut Ego4D video identifiers are recorded on the volume.")
+    uid_file = plans / "ego4d-full-uids.txt"
+    uid_file.write_text("\n".join(video_uids) + "\n", encoding="utf-8")
+    command = ego4d_command(
+        output_directory=DATA_MOUNT / "ego4d-full-preview",
+        uid_file=uid_file,
+        data_version=data_version,
+        aws_profile_name=AWS_PROFILE_NAME,
+        approve_download=False,
+        dataset="video_540ss",
+    )
+    returncode, output = _run_cli(command, approve_download=False)
+    record = {
+        "ego4d_cli_version": EGO4D_CLI_VERSION,
+        "data_version": data_version,
+        "dataset": "video_540ss",
+        "video_uid_count": len(video_uids),
+        "reported_size": _reported_size(output),
+        "returncode": returncode,
+        "download_started": False,
+        "output_tail": _safe_output_tail(output),
+    }
+    (plans / "ego4d-full-preview.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    data_volume.commit()
+    return record
+
+
 @app.function(image=image, volumes={str(DATA_MOUNT): data_volume}, timeout=1_800)
 def probe_housetours_sources(target_source_count: int, request_surplus: int) -> dict[str, object]:
     """Probe more public HouseTours sources than the selected target and retain all outcomes."""
@@ -505,6 +554,7 @@ def freeze_transition_corpus(config_json: str) -> dict[str, object]:
         random_seed=int(config["random_seed"]),
         heldout_counts=config["heldout_counts"],
         train_counts=config["train_counts"],
+        test_counts=config.get("test_counts"),
         ego4d_data_version=str(config["ego4d_data_version"]),
         ego4d_cli_version=EGO4D_CLI_VERSION,
         guard_band_seconds=float(config["guard_band_seconds"]),
@@ -549,6 +599,8 @@ def main(
         result = publish_egoenv_annotations.remote()
     elif action == "resolve-annotations":
         result = resolve_egoenv_identifiers.remote()
+    elif action == "preview-full-download":
+        result = preview_full_ego4d_download.remote(data_version=data_version)
     elif action == "summarize-annotations":
         result = summarize_egoenv_annotations.remote()
     elif action == "probe-housetours":

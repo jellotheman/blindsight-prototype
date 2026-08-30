@@ -40,6 +40,24 @@ it. The official `v2_1` manifests resolve all 644 annotated Ego4D spans through 
 videos; no current direct clip file resolved. This is recorded as a parent-cut strategy, not silently
 treated as a clip download.
 
+## Corpus decision: Ego4D only
+
+HouseTours acquisition failed: all 3 probed public sources (a target of 2 plus 1 surplus) returned
+YouTube's bot challenge, so zero HouseTours source videos exist locally or on the Modal volume. See
+[ADR-0004](adr/0004-drop-housetours-decide-on-ego4d-alone.md). Stage 3 now runs **Run A only** (train
+and evaluate on Ego4D); Runs B and C are shelved pending a working HouseTours access route.
+
+The Ego4D held-out group is drawn as two disjoint sets from one seeded generator: `heldout` fixes the
+decision-policy operating point, and the optional `test` group gives the final threshold-transfer
+measurement, per issue #22's rule that the group that fixes the operating point cannot also give the
+transfer measurement. `build_frozen_manifest` accepts `test_counts` for this; omitting it keeps the
+prior two-way train/heldout behavior.
+
+The full resolved Ego4D download (406 `video_540ss` parent sources, 0 unresolved) previews at
+**117.456 GB** per the official CLI's own confirmation-prompt estimate (2026-08-30). No transfer has
+started; `preview_full_ego4d_download` runs the CLI without `-y` and reads that number before
+declining.
+
 ## Count comparison
 
 The official annotation archive has the specified 8,681 Ego4D and 7,608 HouseTours room intervals,

@@ -168,6 +168,52 @@ def test_frozen_manifest_records_guard_band_complete_clip_splits_and_resolution_
     }
 
 
+def test_test_split_is_disjoint_from_heldout_and_defaults_to_empty() -> None:
+    intervals = [
+        RoomInterval("ego4d", f"ev-{index}", f"ec-{index}", 0, 4, "kitchen", "1")
+        for index in range(6)
+    ] + [
+        RoomInterval("ego4d", f"ev-{index}", f"ec-{index}", 4, 8, "bedroom", "1")
+        for index in range(6)
+    ]
+    boundaries, _ = build_boundary_table(intervals)
+    resolution = {("ego4d", f"ec-{index}"): "clip-file" for index in range(6)}
+
+    without_test = build_frozen_manifest(
+        intervals,
+        boundaries,
+        random_seed=3,
+        heldout_counts={"ego4d": 2, "housetours": 0},
+        train_counts={"ego4d": 4, "housetours": 0},
+        ego4d_data_version="v2_1",
+        ego4d_cli_version="1.7.3",
+        guard_band_seconds=1.0,
+        resolution_by_clip=resolution,
+    )
+    assert not any(clip.split == "test" for clip in without_test.clips)
+
+    with_test = build_frozen_manifest(
+        intervals,
+        boundaries,
+        random_seed=3,
+        heldout_counts={"ego4d": 2, "housetours": 0},
+        train_counts={"ego4d": 2, "housetours": 0},
+        ego4d_data_version="v2_1",
+        ego4d_cli_version="1.7.3",
+        guard_band_seconds=1.0,
+        resolution_by_clip=resolution,
+        test_counts={"ego4d": 2, "housetours": 0},
+    )
+    by_split: dict[str, set[str]] = {}
+    for clip in with_test.clips:
+        by_split.setdefault(clip.split, set()).add(clip.clip_id)
+    assert len(by_split["heldout"]) == 2
+    assert len(by_split["test"]) == 2
+    assert by_split["heldout"].isdisjoint(by_split["test"])
+    assert by_split["heldout"].isdisjoint(by_split["train"])
+    assert by_split["test"].isdisjoint(by_split["train"])
+
+
 def test_corpus_report_requires_an_explanation_when_counts_differ_from_the_specification() -> None:
     interval = RoomInterval("ego4d", "video-1", "clip-1", 0, 4, "kitchen", "1")
     manifest = build_frozen_manifest(
