@@ -63,16 +63,16 @@ excerpts_volume = modal.Volume.from_name("blindsight-excerpts", create_if_missin
 def transition_worker(
     operation: str,
     transition_session_id: str,
-    index: int | None = None,
-    content: bytes | None = None,
-    media_type: str | None = None,
+    items: list[tuple[int, bytes, str]] | None = None,
 ) -> list[dict[str, str]]:
     """Stage 3 production-worker seam.
 
-    Inference arrives in later Stage 3 tickets. This deployed worker deliberately returns no
-    events now, while making the streaming boundary and its Modal lifecycle real.
+    Inference arrives in later Stage 3 tickets. The transport is prefix-batched: one remote
+    call carries the whole contiguous chunk prefix drained from the store. This deployed
+    worker deliberately returns no events now, while keeping the streaming boundary and its
+    Modal lifecycle real.
     """
-    del operation, transition_session_id, index, content, media_type
+    del operation, transition_session_id, items
     return []
 
 
@@ -82,12 +82,10 @@ class _ModalFunctionTransitionWorker:
     def start(self, transition_session_id: str) -> None:
         transition_worker.remote("start", transition_session_id)
 
-    def process(
-        self, transition_session_id: str, index: int, content: bytes, media_type: str
+    def process_prefix(
+        self, transition_session_id: str, items: list[tuple[int, bytes, str]]
     ) -> list[TransitionObservation]:
-        values = transition_worker.remote(
-            "process", transition_session_id, index, content, media_type
-        )
+        values = transition_worker.remote("process", transition_session_id, items)
         return [TransitionObservation(**value) for value in values]
 
     def stop(self, transition_session_id: str) -> None:
@@ -146,6 +144,9 @@ def web():
         transition_adapter=ModalTransitionAdapter(_ModalFunctionTransitionWorker()),
         transition_processing_deadline_seconds=float(
             os.environ.get("BLINDSIGHT_TRANSITION_PROCESSING_DEADLINE_SECONDS", "30")
+        ),
+        transition_idle_timeout_seconds=float(
+            os.environ.get("BLINDSIGHT_TRANSITION_IDLE_TIMEOUT_SECONDS", "300")
         ),
     )
     mount_reference_client(fastapi_app, static_dir=Path("/root/static"))

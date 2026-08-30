@@ -1,12 +1,11 @@
 """Modal encoding pipeline for the Stage 3 causal world-state cache (issue #21).
 
 This is a **sibling** file to ``modal_transition.py``, not an addition to it. ``docs/spec/phase-3-
-transition.md``'s "Code layout" section names ``modal_transition.py`` as the one Modal application
-file for this package; this pass deliberately deviates into its own file to avoid a live-file
-collision with a concurrent agent who owns ``modal_transition.py`` for corpus acquisition. It
-declares its own ``modal.App`` (``blindsight-transition-encode``) and reuses the existing data
-volume and Ego4D secret only by name, exactly as the corpus-acquisition app does. Reconciling the
-two files into one is left to a follow-up pass, as directed.
+transition.md``'s "Code layout" section names both files as the Stage 3 Modal application files:
+``modal_transition.py`` for corpus acquisition and this file for world-state encoding. Each declares
+its own ``modal.App`` (``blindsight-transition-research`` and ``blindsight-transition-encode``) and
+reuses the existing data volume and Ego4D secret only by name, exactly as the corpus-acquisition app
+does.
 
 Like ``modal_transition.py``, this file never imports the Stage 0/1 ASGI application and the ASGI
 application never imports it.

@@ -321,7 +321,7 @@ def test_a_fresh_drain_claim_blocks_a_second_container_from_processing_the_index
 
     delivered = service.put_chunk(session_id, 0, b"first", "video/webm")
     assert delivered["idempotent"] is False
-    assert adapter.processed_chunks == []
+    assert adapter.processed_prefixes == []
     assert store.get(session_id)["_next_index"] == 0
     assert store.try_claim(session_id, 0, lease_seconds=120.0) is None
 
@@ -339,7 +339,7 @@ def test_a_stale_drain_claim_is_stolen_and_processing_proceeds() -> None:
     clock.advance(121.0)
 
     service.put_chunk(session_id, 0, b"first", "video/webm")
-    assert [chunk["index"] for chunk in adapter.processed_chunks] == [0]
+    assert [record["indices"] for record in adapter.processed_prefixes] == [[0]]
     assert store.get(session_id)["_next_index"] == 1
     # The stolen claim was released after processing, so the index can be claimed again.
     assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
@@ -355,11 +355,59 @@ def test_a_drain_claim_is_released_after_processing_so_the_next_index_can_be_dra
     session_id = session["transition_session_id"]
 
     service.put_chunk(session_id, 0, b"first", "video/webm")
-    assert [chunk["index"] for chunk in adapter.processed_chunks] == [0]
+    assert [record["indices"] for record in adapter.processed_prefixes] == [[0]]
     service.put_chunk(session_id, 1, b"second", "video/webm")
-    assert [chunk["index"] for chunk in adapter.processed_chunks] == [0, 1]
+    assert [record["indices"] for record in adapter.processed_prefixes] == [[0], [1]]
     assert store.get(session_id)["_next_index"] == 2
     # Index 0's claim is gone; a later duplicate drain can safely re-claim it.
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
+
+
+def test_the_drain_processes_a_contiguous_prefix_in_one_adapter_call() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter(
+        observations_by_index={1: [TransitionObservation(observed_at="2026-08-30T06:31:00Z")]}
+    )
+    service, store = make_modal_transition_service(SharedModalDict(), clock, adapter)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    service.put_chunk(session_id, 1, b"second", "video/webm")
+    assert adapter.processed_prefixes == []
+
+    service.put_chunk(session_id, 0, b"first", "video/webm")
+    assert [record["indices"] for record in adapter.processed_prefixes] == [[0, 1]]
+    assert [
+        (index, content, media_type)
+        for index, content, media_type in adapter.processed_prefixes[0]["items"]
+    ] == [(0, b"first", "video/webm"), (1, b"second", "video/webm")]
+    assert store.get(session_id)["_next_index"] == 2
+    assert [event["observed_at"] for event in store.get(session_id)["events"]] == [
+        "2026-08-30T06:31:00Z"
+    ]
+    assert store.get_chunk(session_id, 0) is None
+    assert store.get_chunk(session_id, 1) is None
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
+    assert store.try_claim(session_id, 1, lease_seconds=120.0) is not None
+
+
+def test_a_failed_prefix_call_fails_the_session_for_the_whole_batch() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter(fail_on_process=RuntimeError("inference unavailable"))
+    service, store = make_modal_transition_service(SharedModalDict(), clock, adapter)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    service.put_chunk(session_id, 1, b"second", "video/webm")
+    service.put_chunk(session_id, 0, b"first", "video/webm")
+
+    resource = store.get(session_id)
+    assert resource["status"] == "failed"
+    assert resource["failure"]["code"] == "TRANSITION_ADAPTER_FAILED"
+    assert resource["failure"]["retryable"] is True
+    assert store.get_chunk(session_id, 0) is None
+    assert store.get_chunk(session_id, 1) is None
+    assert [record["indices"] for record in adapter.processed_prefixes] == []
     assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
 
 
@@ -413,8 +461,8 @@ def test_in_memory_and_modal_adapters_share_the_transition_adapter_interface() -
         def start(self, transition_session_id: str) -> None:
             return None
 
-        def process(
-            self, transition_session_id: str, index: int, content: bytes, media_type: str
+        def process_prefix(
+            self, transition_session_id: str, items: list[tuple[int, bytes, str]]
         ) -> list[TransitionObservation]:
             return []
 
@@ -423,7 +471,7 @@ def test_in_memory_and_modal_adapters_share_the_transition_adapter_interface() -
 
     for adapter in (InMemoryTransitionAdapter(), ModalTransitionAdapter(FakeModalWorker())):
         adapter.start("trs_00000000")
-        assert adapter.process("trs_00000000", 0, b"chunk", "video/webm") == []
+        assert adapter.process_prefix("trs_00000000", [(0, b"chunk", "video/webm")]) == []
         adapter.stop("trs_00000000")
 
 

@@ -91,6 +91,7 @@ def create_app(
     max_transition_chunk_bytes: int = 10 * 1024 * 1024,
     max_transition_queued_bytes: int = 100 * 1024 * 1024,
     transition_processing_deadline_seconds: float = 30.0,
+    transition_idle_timeout_seconds: float = 300.0,
 ) -> FastAPI:
     catalog = ExcerptCatalog(manifest_path)
     resolved_store = store or MemoryCaptureStore()
@@ -118,6 +119,7 @@ def create_app(
         max_chunk_bytes=max_transition_chunk_bytes,
         max_queued_bytes=max_transition_queued_bytes,
         processing_deadline_seconds=transition_processing_deadline_seconds,
+        idle_timeout_seconds=transition_idle_timeout_seconds,
     )
 
     app = FastAPI(title="BlindSight Stage 0/1 API")

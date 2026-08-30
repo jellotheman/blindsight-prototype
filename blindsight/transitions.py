@@ -61,15 +61,19 @@ class TransitionAdapter(Protocol):
 
     def start(self, transition_session_id: str) -> None: ...
 
-    def process(
-        self, transition_session_id: str, index: int, content: bytes, media_type: str
+    def process_prefix(
+        self, transition_session_id: str, items: list[tuple[int, bytes, str]]
     ) -> list[TransitionObservation]: ...
 
     def stop(self, transition_session_id: str) -> None: ...
 
 
 class InMemoryTransitionAdapter:
-    """Deterministic local adapter; observations can be selected by processed chunk index."""
+    """Deterministic local adapter; observations can be selected by processed chunk index.
+
+    ``processed_prefixes`` records one entry per prefix call: the session id, the claimed
+    contiguous indices, and the ``(index, content, media_type)`` items handed to inference.
+    """
 
     def __init__(
         self,
@@ -81,27 +85,32 @@ class InMemoryTransitionAdapter:
         self._observations_by_index = observations_by_index or {}
         self._fail_on_start = fail_on_start
         self._fail_on_process = fail_on_process
-        self.processed_chunks: list[dict[str, Any]] = []
+        self.processed_prefixes: list[dict[str, Any]] = []
         self.stopped_session_ids: list[str] = []
 
     def start(self, transition_session_id: str) -> None:
         if self._fail_on_start is not None:
             raise self._fail_on_start
 
-    def process(
-        self, transition_session_id: str, index: int, content: bytes, media_type: str
+    def process_prefix(
+        self, transition_session_id: str, items: list[tuple[int, bytes, str]]
     ) -> list[TransitionObservation]:
         if self._fail_on_process is not None:
             raise self._fail_on_process
-        self.processed_chunks.append(
+        self.processed_prefixes.append(
             {
                 "transition_session_id": transition_session_id,
-                "index": index,
-                "content": bytes(content),
-                "media_type": media_type,
+                "indices": [index for index, _, _ in items],
+                "items": [
+                    (index, bytes(content), media_type) for index, content, media_type in items
+                ],
             }
         )
-        return list(self._observations_by_index.get(index, []))
+        return [
+            observation
+            for index, _, _ in items
+            for observation in self._observations_by_index.get(index, [])
+        ]
 
     def stop(self, transition_session_id: str) -> None:
         self.stopped_session_ids.append(transition_session_id)
@@ -112,8 +121,8 @@ class ModalTransitionWorker(Protocol):
 
     def start(self, transition_session_id: str) -> None: ...
 
-    def process(
-        self, transition_session_id: str, index: int, content: bytes, media_type: str
+    def process_prefix(
+        self, transition_session_id: str, items: list[tuple[int, bytes, str]]
     ) -> list[TransitionObservation]: ...
 
     def stop(self, transition_session_id: str) -> None: ...
@@ -128,10 +137,10 @@ class ModalTransitionAdapter:
     def start(self, transition_session_id: str) -> None:
         self._worker.start(transition_session_id)
 
-    def process(
-        self, transition_session_id: str, index: int, content: bytes, media_type: str
+    def process_prefix(
+        self, transition_session_id: str, items: list[tuple[int, bytes, str]]
     ) -> list[TransitionObservation]:
-        return self._worker.process(transition_session_id, index, content, media_type)
+        return self._worker.process_prefix(transition_session_id, items)
 
     def stop(self, transition_session_id: str) -> None:
         self._worker.stop(transition_session_id)
@@ -401,6 +410,7 @@ class TransitionService:
         max_queued_bytes: int = 100 * 1024 * 1024,
         processing_deadline_seconds: float = 30.0,
         idle_timeout_seconds: float = 300.0,
+        max_batch_items: int = 30,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
@@ -410,6 +420,7 @@ class TransitionService:
         self._max_queued_bytes = max_queued_bytes
         self._processing_deadline_seconds = processing_deadline_seconds
         self._idle_timeout_seconds = idle_timeout_seconds
+        self._max_batch_items = max_batch_items
         self._claim_lease_seconds = 2 * processing_deadline_seconds + 30.0
         self._clock = clock or _utc_now
         self._drain_lock = threading.Lock()
@@ -531,41 +542,61 @@ class TransitionService:
                 resource = self._store.get(transition_session_id)
                 if resource is None or resource["status"] != "active":
                     return
-                index = resource["_next_index"]
-                chunk = self._store.get_chunk(transition_session_id, index)
-                if chunk is None:
-                    return
-                token = self._store.try_claim(
-                    transition_session_id, index, lease_seconds=self._claim_lease_seconds
-                )
-                if token is None:
-                    # Another container owns a fresh lease on this index.  Once the owner
-                    # advances `_next_index`, the next chunk PUT re-triggers the drain here.
-                    resource = self._store.get(transition_session_id)
-                    if resource is None or resource["status"] != "active":
-                        return
-                    if resource["_next_index"] == index:
-                        return
+                head_index = resource["_next_index"]
+                items: list[tuple[int, bytes, str]] = []
+                claims: list[tuple[int, str]] = []
+                retry = False
+                index = head_index
+                while len(items) < self._max_batch_items:
+                    chunk = self._store.get_chunk(transition_session_id, index)
+                    if chunk is None:
+                        break
+                    token = self._store.try_claim(
+                        transition_session_id, index, lease_seconds=self._claim_lease_seconds
+                    )
+                    if token is None:
+                        if items:
+                            # A later index is leased elsewhere; the prefix claimed so far is
+                            # still contiguous, so process it rather than waiting on the queue.
+                            break
+                        # Another container owns a fresh lease on the head index.  Once the
+                        # owner advances `_next_index`, the next chunk PUT re-triggers the
+                        # drain here; if it already advanced, retry from the new head.
+                        resource = self._store.get(transition_session_id)
+                        if resource is None or resource["status"] != "active":
+                            return
+                        if resource["_next_index"] == head_index:
+                            return
+                        retry = True
+                        break
+                    items.append((index, chunk[0], chunk[1]))
+                    claims.append((index, token))
+                    index += 1
+                if retry:
                     continue
-                content, media_type = chunk
+                if not items:
+                    return
                 outcome, value = run_with_deadline(
-                    lambda: self._adapter.process(transition_session_id, index, content, media_type),
+                    lambda: self._adapter.process_prefix(transition_session_id, items),
                     self._processing_deadline_seconds,
                 )
                 resource = self._store.get(transition_session_id)
                 if resource is None or resource["status"] != "active":
-                    self._store.release_claim(transition_session_id, index, token)
+                    self._release_claims(transition_session_id, claims)
                     return
-                if outcome != "result" or not isinstance(value, list):
-                    self._store.release_claim(transition_session_id, index, token)
+                if (
+                    outcome != "result"
+                    or not isinstance(value, list)
+                    or not all(
+                        isinstance(observation, TransitionObservation) for observation in value
+                    )
+                ):
+                    self._release_claims(transition_session_id, claims)
                     self._fail(resource, "TRANSITION_ADAPTER_FAILED")
                     return
-                if not all(isinstance(observation, TransitionObservation) for observation in value):
-                    self._store.release_claim(transition_session_id, index, token)
-                    self._fail(resource, "TRANSITION_ADAPTER_FAILED")
-                    return
-                self._store.mark_processed(transition_session_id, index, content)
-                resource["_next_index"] = index + 1
+                for item_index, content, _ in items:
+                    self._store.mark_processed(transition_session_id, item_index, content)
+                resource["_next_index"] = items[-1][0] + 1
                 resource["events"].extend(
                     {
                         "transition_event_id": _identifier("tev"),
@@ -575,7 +606,13 @@ class TransitionService:
                 )
                 resource["updated_at"] = self._timestamp()
                 self._store.put(transition_session_id, resource)
-                self._store.release_claim(transition_session_id, index, token)
+                self._release_claims(transition_session_id, claims)
+
+    def _release_claims(
+        self, transition_session_id: str, claims: list[tuple[int, str]]
+    ) -> None:
+        for index, token in claims:
+            self._store.release_claim(transition_session_id, index, token)
 
     def _fail(self, resource: dict[str, Any], code: str) -> None:
         resource["status"] = "failed"
