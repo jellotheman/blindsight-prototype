@@ -22,6 +22,7 @@ browser reference client and a React Native Android client can use equally.
 - [`docs/spec/openapi.yaml`](docs/spec/openapi.yaml) — complete machine-readable HTTP contract
 - [`docs/spec/examples.md`](docs/spec/examples.md) — worked `curl` and `fetch` flows
 - [`CONTEXT.md`](CONTEXT.md) — canonical product vocabulary
+- [`docs/rollback.md`](docs/rollback.md) — how to get back to a known-working state
 - `REFERENCE.local.md` — read this too if it is present in your checkout
 
 ## Scope
