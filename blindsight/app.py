@@ -166,11 +166,11 @@ def create_app(
             mime_type = source.get("mime_type")
             if not isinstance(mime_type, str):
                 raise ApiError(400, "INVALID_REQUEST", "A live MIME type is required.")
-            if mime_type not in {"video/webm", "video/mp4"}:
+            if mime_type not in {"video/webm", "video/mp4", "video/quicktime"}:
                 raise ApiError(
                     415,
                     "UNSUPPORTED_MEDIA_TYPE",
-                    "Supported live capture types are video/webm and video/mp4.",
+                    "Supported live capture types are video/webm, video/mp4, and video/quicktime.",
                 )
             resource = capture_service.create_live(mime_type)
         else:

@@ -49,7 +49,7 @@ class FfmpegChunkRemuxer:
     """
 
     def remux(self, evidence: CaptureEvidence) -> CaptureEvidence:
-        if evidence.media_type not in {"video/webm", "video/mp4"}:
+        if evidence.media_type not in {"video/webm", "video/mp4", "video/quicktime"}:
             return evidence
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg is None:

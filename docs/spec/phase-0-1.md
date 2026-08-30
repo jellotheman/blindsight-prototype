@@ -218,10 +218,12 @@ already spoke. Retained evidence is unaffected.
   decodability or invoking a provider. `MediaRecorder` writes WebM/Matroska (VP8/VP9) in streaming
   mode and never patches the segment Duration/seek metadata once recording stops; `ffprobe`
   accepts the result, but Reka's ingestion cannot decode it -- it parses the container and then
-  yields zero frames. Transcode a live WebM to H.264 MP4 (the codec/container pair the preloaded
-  excerpt path already hands Reka successfully); copy-remux an already-MP4 live capture to repair
-  its streaming metadata without a lossy re-encode. Retained evidence keeps the repaired clip,
-  since that is what a provider actually saw.
+  yields zero frames. A native iOS client records QuickTime/MOV (`video/quicktime`), and container
+  type alone does not rescue a capture: any codec other than H.264 (e.g. iOS HEVC) yields the same
+  zero-frame failure. Transcode a live WebM -- or any non-H.264 live capture, including MOV -- to
+  H.264 MP4 (the codec/container pair the preloaded excerpt path already hands Reka successfully);
+  copy-remux an already-H.264-in-MP4 live capture to repair its streaming metadata without a lossy
+  re-encode. Retained evidence keeps the repaired clip, since that is what a provider actually saw.
 - Validate assembled media before provider spend. A corrupt or incomplete capture is a capture
   failure, not a model failure.
 - Keep provider-specific ingestion behind internal adapters. The public interface exposes one

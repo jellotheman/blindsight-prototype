@@ -129,11 +129,11 @@ class CaptureService:
             )
         if not 1 <= chunk_count <= 10000:
             raise ApiError(400, "INVALID_REQUEST", "chunk_count must be between 1 and 10000.")
-        if mime_type not in {"video/webm", "video/mp4"}:
+        if mime_type not in {"video/webm", "video/mp4", "video/quicktime"}:
             raise ApiError(
                 415,
                 "UNSUPPORTED_MEDIA_TYPE",
-                "Supported live capture types are video/webm and video/mp4.",
+                "Supported live capture types are video/webm, video/mp4, and video/quicktime.",
             )
         if mime_type != resource["source"]["mime_type"]:
             raise ApiError(400, "INVALID_REQUEST", "Completion MIME type must match the capture.")

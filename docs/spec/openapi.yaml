@@ -482,7 +482,7 @@ components:
           example:
             error:
               code: UNSUPPORTED_MEDIA_TYPE
-              message: Supported live capture types are video/webm and video/mp4.
+              message: Supported live capture types are video/webm, video/mp4, and video/quicktime.
               retryable: false
               details: {}
     InternalError:
@@ -533,7 +533,7 @@ components:
           const: live
         mime_type:
           type: string
-          enum: [video/webm, video/mp4]
+          enum: [video/webm, video/mp4, video/quicktime]
     ExcerptSource:
       type: object
       additionalProperties: false
@@ -571,7 +571,7 @@ components:
           description: Declared total; every index from zero through chunk_count minus one must exist.
         mime_type:
           type: string
-          enum: [video/webm, video/mp4]
+          enum: [video/webm, video/mp4, video/quicktime]
     ChunkReceipt:
       type: object
       additionalProperties: false

@@ -15,7 +15,12 @@ from blindsight.app import create_app
 from blindsight.providers import CaptureEvidence, DeterministicProvider, ProviderResult
 from blindsight.storage import MemoryCaptureStore, ModalCaptureStore
 from tests.conftest import SchemaValidator
-from tests.test_remux import _ffprobe_duration, _ffprobe_video_codec, _synthetic_hevc_mp4
+from tests.test_remux import (
+    _ffprobe_duration,
+    _ffprobe_video_codec,
+    _synthetic_hevc_mp4,
+    _synthetic_hevc_quicktime,
+)
 
 
 VALID_CARD_BODY: dict[str, object] = {
@@ -352,6 +357,15 @@ def test_capture_requests_reject_unsupported_media_and_contract_drift(
     schema.assert_json_response("/v1/captures", "post", unsupported)
     assert unsupported.json()["error"]["code"] == "UNSUPPORTED_MEDIA_TYPE"
 
+    unsupported_complete = client.post(
+        "/v1/captures",
+        headers=auth_headers,
+        json={"source": {"type": "live", "mime_type": "video/x-msvideo"}},
+    )
+    assert unsupported_complete.status_code == 415
+    schema.assert_json_response("/v1/captures", "post", unsupported_complete)
+    assert unsupported_complete.json()["error"]["code"] == "UNSUPPORTED_MEDIA_TYPE"
+
     extra_property = client.post(
         "/v1/captures",
         headers=auth_headers,
@@ -363,6 +377,76 @@ def test_capture_requests_reject_unsupported_media_and_contract_drift(
     assert extra_property.status_code == 400
     schema.assert_json_response("/v1/captures", "post", extra_property)
     assert extra_property.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_live_capture_accepts_quicktime_mime_type(
+    api_key: str, auth_headers: dict[str, str], schema: SchemaValidator
+) -> None:
+    class AcceptingMediaValidator:
+        def is_decodable(self, evidence: CaptureEvidence) -> bool:
+            return True
+
+    client = TestClient(
+        create_app(
+            api_key=api_key,
+            store=MemoryCaptureStore(),
+            provider=DeterministicProvider(card_body=VALID_CARD_BODY),
+            media_validator=AcceptingMediaValidator(),
+        )
+    )
+
+    created = client.post(
+        "/v1/captures",
+        headers=auth_headers,
+        json={"source": {"type": "live", "mime_type": "video/quicktime"}},
+    )
+    assert created.status_code == 201
+    schema.assert_json_response("/v1/captures", "post", created)
+    assert created.json()["source"] == {"type": "live", "mime_type": "video/quicktime"}
+
+    capture_id = created.json()["capture_id"]
+    uploaded = client.put(
+        f"/v1/captures/{capture_id}/chunks/0",
+        headers={**auth_headers, "Content-Type": "application/octet-stream"},
+        content=b"quicktime-chunk",
+    )
+    assert uploaded.status_code == 200
+
+    completed = client.post(
+        f"/v1/captures/{capture_id}/complete",
+        headers=auth_headers,
+        json={"chunk_count": 1, "mime_type": "video/quicktime"},
+    )
+    assert completed.status_code == 202
+    schema.assert_json_response("/v1/captures/{capture_id}/complete", "post", completed)
+    assert wait_for_capture(client, completed.headers["location"])["status"] == "succeeded"
+
+
+def test_complete_mime_type_mismatch_is_rejected(
+    api_key: str, auth_headers: dict[str, str], schema: SchemaValidator
+) -> None:
+    client = TestClient(create_app(api_key=api_key))
+    capture_id = client.post(
+        "/v1/captures",
+        headers=auth_headers,
+        json={"source": {"type": "live", "mime_type": "video/quicktime"}},
+    ).json()["capture_id"]
+    client.put(
+        f"/v1/captures/{capture_id}/chunks/0",
+        headers={**auth_headers, "Content-Type": "application/octet-stream"},
+        content=b"chunk",
+    )
+
+    response = client.post(
+        f"/v1/captures/{capture_id}/complete",
+        headers=auth_headers,
+        json={"chunk_count": 1, "mime_type": "video/webm"},
+    )
+
+    assert response.status_code == 400
+    schema.assert_json_response("/v1/captures/{capture_id}/complete", "post", response)
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert response.json()["error"]["message"] == "Completion MIME type must match the capture."
 
 
 def test_chunk_and_accumulated_capture_size_limits_use_documented_error(
@@ -853,6 +937,68 @@ def test_live_capture_completes_when_hevc_mp4_chunks_need_transcode(
         f"/v1/captures/{capture_id}/complete",
         headers=auth_headers,
         json={"chunk_count": 3, "mime_type": "video/mp4"},
+    )
+    settled = wait_for_capture(client, completed.headers["location"], deadline_seconds=15)
+
+    assert settled["status"] == "succeeded"
+
+
+def test_live_capture_completes_when_hevc_quicktime_chunks_need_transcode(
+    api_key: str, auth_headers: dict[str, str]
+) -> None:
+    """Reproduces the iOS defect: a native client records QuickTime/MOV chunks declared as
+    `video/quicktime`. An HEVC clip inside a MOV container passes ffprobe's codec check --
+    Reka's ingestion does not, yielding zero frames exactly like VP9 WebM. The backend must
+    transcode it to H.264 MP4 before a provider ever sees it.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if ffmpeg is None or ffprobe is None:
+        pytest.skip("ffmpeg and ffprobe are required to reproduce a streamed-chunk capture")
+    if subprocess.run(
+        [ffmpeg, "-hide_banner", "-encoders"], capture_output=True, timeout=30
+    ).stdout.count(b"libx265") == 0:
+        pytest.skip("libx265 is required to reproduce the Reka-incompatible HEVC transcode")
+
+    streamed = _synthetic_hevc_quicktime(ffmpeg)
+
+    class RekaLikeProvider:
+        """Stands in for Reka: yields zero decoded frames from anything but H.264 MP4."""
+
+        def describe(self, evidence: CaptureEvidence) -> ProviderResult:
+            if evidence.media_type != "video/mp4" or _ffprobe_video_codec(
+                ffprobe, evidence.content
+            ) != "h264":
+                return ProviderResult(
+                    raw_text="",
+                    card_body=None,
+                    failure_kind="transport",
+                    error="Expected 6 frames, got 0 None",
+                )
+            return ProviderResult(raw_text="valid", card_body=VALID_CARD_BODY)
+
+    client = TestClient(create_app(api_key=api_key, provider=RekaLikeProvider()))
+    capture_id = client.post(
+        "/v1/captures",
+        headers=auth_headers,
+        json={"source": {"type": "live", "mime_type": "video/quicktime"}},
+    ).json()["capture_id"]
+
+    cut_one = len(streamed) // 3
+    cut_two = cut_one * 2
+    chunks = [streamed[:cut_one], streamed[cut_one:cut_two], streamed[cut_two:]]
+    for index in (2, 0, 1):
+        uploaded = client.put(
+            f"/v1/captures/{capture_id}/chunks/{index}",
+            headers={**auth_headers, "Content-Type": "application/octet-stream"},
+            content=chunks[index],
+        )
+        assert uploaded.status_code == 200
+
+    completed = client.post(
+        f"/v1/captures/{capture_id}/complete",
+        headers=auth_headers,
+        json={"chunk_count": 3, "mime_type": "video/quicktime"},
     )
     settled = wait_for_capture(client, completed.headers["location"], deadline_seconds=15)
 

@@ -168,6 +168,36 @@ def _synthetic_hevc_mp4(ffmpeg: str) -> bytes:
         return target.read_bytes()
 
 
+def _synthetic_hevc_quicktime(ffmpeg: str) -> bytes:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        target = Path(tmp_dir) / "source.mov"
+        subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=64x64:rate=5",
+                "-c:v",
+                "libx265",
+                "-pix_fmt",
+                "yuv420p",
+                "-tag:v",
+                "hvc1",
+                "-f",
+                "mov",
+                str(target),
+            ],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        return target.read_bytes()
+
+
 def test_webm_capture_is_transcoded_to_h264_mp4() -> None:
     ffmpeg = _require_ffmpeg_with_libx264()
     ffprobe = shutil.which("ffprobe")
@@ -223,6 +253,21 @@ def test_hevc_mp4_capture_is_transcoded_to_h264_mp4() -> None:
     hevc = _synthetic_hevc_mp4(ffmpeg)
 
     remuxed = FfmpegChunkRemuxer().remux(CaptureEvidence(content=hevc, media_type="video/mp4"))
+
+    assert remuxed.media_type == "video/mp4"
+    assert _ffprobe_video_codec(ffprobe, remuxed.content) == "h264"
+
+
+def test_hevc_quicktime_capture_is_transcoded_to_h264_mp4() -> None:
+    ffmpeg = _require_ffmpeg_with_libx265()
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        pytest.skip("ffprobe is required to verify the transcode")
+    hevc = _synthetic_hevc_quicktime(ffmpeg)
+
+    remuxed = FfmpegChunkRemuxer().remux(
+        CaptureEvidence(content=hevc, media_type="video/quicktime")
+    )
 
     assert remuxed.media_type == "video/mp4"
     assert _ffprobe_video_codec(ffprobe, remuxed.content) == "h264"
