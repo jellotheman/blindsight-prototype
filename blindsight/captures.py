@@ -16,6 +16,7 @@ from .evidence import EvidenceStore, NullEvidenceStore, RunClock
 from .excerpts import ExcerptCatalog
 from .media import MediaValidator
 from .providers import CaptureEvidence, CaptureProvider, ProviderResult
+from .remux import MediaRemuxer, PassthroughMediaRemuxer
 from .scene_card import SceneCard, SceneCardBody
 from .storage import CaptureStore
 
@@ -41,6 +42,7 @@ class CaptureService:
         provider: CaptureProvider,
         catalog: ExcerptCatalog,
         media_validator: MediaValidator,
+        media_remuxer: MediaRemuxer | None = None,
         max_chunk_bytes: int = 10 * 1024 * 1024,
         max_capture_bytes: int = 100 * 1024 * 1024,
         runner: ThreadRunner | None = None,
@@ -51,6 +53,7 @@ class CaptureService:
         self.provider = provider
         self.catalog = catalog
         self.media_validator = media_validator
+        self.media_remuxer = media_remuxer or PassthroughMediaRemuxer()
         self.max_chunk_bytes = max_chunk_bytes
         self.max_capture_bytes = max_capture_bytes
         self.runner = runner or ThreadRunner()
@@ -189,6 +192,14 @@ class CaptureService:
             return
         clock = RunClock()
         evidence = replace(evidence, clock=clock)
+        if resource["source"]["type"] == "live":
+            # A live clip is repaired into a provider-acceptable container/codec before it is
+            # retained or described; the retained evidence therefore shows what the provider saw.
+            try:
+                evidence = self.media_remuxer.remux(evidence)
+            except Exception:
+                pass
+            clock.mark("remuxed_ms")
         resource["updated_at"] = _now()
         try:
             self.evidence_store.retain_capture(

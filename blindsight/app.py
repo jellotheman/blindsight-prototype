@@ -30,6 +30,7 @@ from .providers import (
     DeterministicProvider,
 )
 from .questions import QuestionService
+from .remux import FfmpegChunkRemuxer, MediaRemuxer
 from .storage import CaptureStore, MemoryCaptureStore
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parent.parent / "data" / "excerpts" / "manifest.json"
@@ -69,6 +70,7 @@ def create_app(
     store: CaptureStore | None = None,
     provider: CaptureProvider | None = None,
     media_validator: MediaValidator | None = None,
+    media_remuxer: MediaRemuxer | None = None,
     max_chunk_bytes: int = 10 * 1024 * 1024,
     max_capture_bytes: int = 100 * 1024 * 1024,
     evidence_store: EvidenceStore | None = None,
@@ -85,6 +87,7 @@ def create_app(
         provider=provider or DeterministicProvider(card_body=DEFAULT_CARD),
         catalog=catalog,
         media_validator=media_validator or FfprobeMediaValidator(),
+        media_remuxer=media_remuxer or FfmpegChunkRemuxer(),
         max_chunk_bytes=max_chunk_bytes,
         max_capture_bytes=max_capture_bytes,
         evidence_store=evidence_store,
