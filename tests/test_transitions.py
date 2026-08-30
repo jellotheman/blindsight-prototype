@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import time
 import threading
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable
 
 import pytest
 from fastapi.testclient import TestClient
 
 from blindsight.app import create_app
+from blindsight.errors import ApiError
 from blindsight.transitions import (
     InMemoryTransitionAdapter,
+    MemoryTransitionSessionStore,
     ModalTransitionAdapter,
     ModalTransitionSessionStore,
     TransitionObservation,
+    TransitionService,
 )
 
 from tests.conftest import SchemaValidator
@@ -56,6 +60,26 @@ def wait_for_session(
             return resource
         time.sleep(0.01)
     raise AssertionError("Transition session did not leave starting state.")
+
+
+class StaticClock:
+    """Injectable fake clock so claim leases and idle timeouts are deterministic."""
+
+    def __init__(self, start: datetime) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now = self.now + timedelta(seconds=seconds)
+
+
+class SynchronousRunner:
+    """Runs submitted start and drain work inline so service tests are deterministic."""
+
+    def submit(self, operation: Callable[[], None]) -> None:
+        operation()
 
 
 def create_session(
@@ -277,6 +301,68 @@ def test_modal_backed_sessions_coordinate_queue_limits_and_deletion_across_apps(
     assert adapter.stopped_session_ids == [created.json()["transition_session_id"]]
 
 
+def make_modal_transition_service(
+    dictionary: SharedModalDict, clock: StaticClock, adapter: InMemoryTransitionAdapter
+) -> tuple[TransitionService, ModalTransitionSessionStore]:
+    store = ModalTransitionSessionStore(dictionary, clock=clock)
+    service = TransitionService(store=store, adapter=adapter, runner=SynchronousRunner(), clock=clock)
+    return service, store
+
+
+def test_a_fresh_drain_claim_blocks_a_second_container_from_processing_the_index() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter()
+    service, store = make_modal_transition_service(SharedModalDict(), clock, adapter)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    # The first container claims index 0 and is still inside its lease.
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
+
+    delivered = service.put_chunk(session_id, 0, b"first", "video/webm")
+    assert delivered["idempotent"] is False
+    assert adapter.processed_chunks == []
+    assert store.get(session_id)["_next_index"] == 0
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is None
+
+
+def test_a_stale_drain_claim_is_stolen_and_processing_proceeds() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter(
+        observations_by_index={0: [TransitionObservation(observed_at="2026-08-30T06:30:00Z")]}
+    )
+    service, store = make_modal_transition_service(SharedModalDict(), clock, adapter)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
+    clock.advance(121.0)
+
+    service.put_chunk(session_id, 0, b"first", "video/webm")
+    assert [chunk["index"] for chunk in adapter.processed_chunks] == [0]
+    assert store.get(session_id)["_next_index"] == 1
+    # The stolen claim was released after processing, so the index can be claimed again.
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
+
+
+def test_a_drain_claim_is_released_after_processing_so_the_next_index_can_be_drained() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter(
+        observations_by_index={1: [TransitionObservation(observed_at="2026-08-30T06:31:00Z")]}
+    )
+    service, store = make_modal_transition_service(SharedModalDict(), clock, adapter)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    service.put_chunk(session_id, 0, b"first", "video/webm")
+    assert [chunk["index"] for chunk in adapter.processed_chunks] == [0]
+    service.put_chunk(session_id, 1, b"second", "video/webm")
+    assert [chunk["index"] for chunk in adapter.processed_chunks] == [0, 1]
+    assert store.get(session_id)["_next_index"] == 2
+    # Index 0's claim is gone; a later duplicate drain can safely re-claim it.
+    assert store.try_claim(session_id, 0, lease_seconds=120.0) is not None
+
+
 @pytest.mark.parametrize("api_key_value", [None, "wrong-key"])
 @pytest.mark.parametrize(
     ("method", "url", "path_template", "request_kwargs"),
@@ -339,3 +425,79 @@ def test_in_memory_and_modal_adapters_share_the_transition_adapter_interface() -
         adapter.start("trs_00000000")
         assert adapter.process("trs_00000000", 0, b"chunk", "video/webm") == []
         adapter.stop("trs_00000000")
+
+
+def make_idle_transition_service(
+    clock: StaticClock, adapter: InMemoryTransitionAdapter, idle_timeout_seconds: float
+) -> tuple[TransitionService, MemoryTransitionSessionStore]:
+    store = MemoryTransitionSessionStore(clock=clock)
+    service = TransitionService(
+        store=store,
+        adapter=adapter,
+        runner=SynchronousRunner(),
+        idle_timeout_seconds=idle_timeout_seconds,
+        clock=clock,
+    )
+    return service, store
+
+
+def test_an_idle_active_session_fails_clears_media_and_stops_the_adapter() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter()
+    service, store = make_idle_transition_service(clock, adapter, idle_timeout_seconds=60.0)
+    session = service.create()
+    session_id = session["transition_session_id"]
+    service.put_chunk(session_id, 1, b"later", "video/webm")
+    assert store.get_chunk(session_id, 1) is not None
+
+    clock.advance(61.0)
+    expired = service.get(session_id, None)
+    assert expired["status"] == "failed"
+    assert expired["failure"]["code"] == "TRANSITION_ADAPTER_FAILED"
+    assert "inactivity" in expired["failure"]["message"]
+    assert expired["failure"]["retryable"] is False
+    assert adapter.stopped_session_ids == [session_id]
+    assert store.get_chunk(session_id, 1) is None
+
+    try:
+        service.put_chunk(session_id, 0, b"late", "video/webm")
+    except ApiError as error:
+        assert error.status_code == 409
+        assert error.code == "INVALID_STATE"
+    else:
+        pytest.fail("A chunk PUT to an expired session must be rejected.")
+
+
+def test_an_idle_timeout_of_zero_or_less_disables_the_idle_policy() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter()
+    service, _ = make_idle_transition_service(clock, adapter, idle_timeout_seconds=0.0)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    clock.advance(3600.0)
+    active = service.get(session_id, None)
+    assert active["status"] == "active"
+    assert active["failure"] is None
+    assert adapter.stopped_session_ids == []
+
+
+def test_chunk_delivery_refreshes_activity_so_an_active_session_never_trips() -> None:
+    clock = StaticClock(datetime(2026, 8, 30, 6, 30, 0, tzinfo=timezone.utc))
+    adapter = InMemoryTransitionAdapter(
+        observations_by_index={0: [TransitionObservation(observed_at="2026-08-30T06:30:00Z")]}
+    )
+    service, _ = make_idle_transition_service(clock, adapter, idle_timeout_seconds=60.0)
+    session = service.create()
+    session_id = session["transition_session_id"]
+
+    # The gap is far past the timeout, but only a get enforces the policy and the chunk
+    # PUT refreshes `updated_at` first.
+    clock.advance(400.0)
+    service.put_chunk(session_id, 0, b"first", "video/webm")
+    clock.advance(50.0)
+
+    resource = service.get(session_id, None)
+    assert resource["status"] == "active"
+    assert resource["failure"] is None
+    assert [event["observed_at"] for event in resource["events"]] == ["2026-08-30T06:30:00Z"]

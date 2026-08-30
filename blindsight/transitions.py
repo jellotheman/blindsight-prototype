@@ -22,7 +22,27 @@ MEDIA_TYPES = {"video/webm", "video/mp4", "video/quicktime"}
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return _iso(datetime.now(timezone.utc))
+
+
+def _iso(at: datetime) -> str:
+    return at.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _identifier(prefix: str) -> str:
@@ -146,15 +166,23 @@ class TransitionSessionStore(Protocol):
 
     def clear_chunks(self, transition_session_id: str, indices: list[int]) -> None: ...
 
+    def try_claim(
+        self, transition_session_id: str, index: int, *, lease_seconds: float
+    ) -> str | None: ...
+
+    def release_claim(self, transition_session_id: str, index: int, token: str) -> None: ...
+
 
 class MemoryTransitionSessionStore:
     """Thread-safe local session store.  It retains hashes after processing for idempotency."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
         self._lock = threading.RLock()
+        self._clock = clock or _utc_now
         self._resources: dict[str, dict[str, Any]] = {}
         self._chunks: dict[tuple[str, int], tuple[bytes, str]] = {}
         self._processed_hashes: dict[tuple[str, int], str] = {}
+        self._claims: dict[tuple[str, int], dict[str, Any]] = {}
 
     def create(self, resource: dict[str, Any]) -> None:
         with self._lock:
@@ -219,12 +247,35 @@ class MemoryTransitionSessionStore:
                 self._chunks.pop(key, None)
                 self._processed_hashes.pop(key, None)
 
+    def try_claim(self, transition_session_id: str, index: int, *, lease_seconds: float) -> str | None:
+        key = (transition_session_id, index)
+        token = uuid.uuid4().hex
+        with self._lock:
+            existing = self._claims.get(key)
+            if existing is not None:
+                claimed_at = _parse_timestamp(existing.get("claimed_at"))
+                is_fresh = claimed_at is not None and (
+                    self._clock() - claimed_at
+                ).total_seconds() < lease_seconds
+                if is_fresh:
+                    return None
+            self._claims[key] = {"token": token, "claimed_at": _iso(self._clock())}
+            return token
+
+    def release_claim(self, transition_session_id: str, index: int, token: str) -> None:
+        key = (transition_session_id, index)
+        with self._lock:
+            claim = self._claims.get(key)
+            if claim is not None and claim.get("token") == token:
+                self._claims.pop(key, None)
+
 
 class ModalTransitionSessionStore:
     """Transition-session state kept in the existing Modal Dict, never in request memory."""
 
-    def __init__(self, dictionary: Any) -> None:
+    def __init__(self, dictionary: Any, *, clock: Callable[[], datetime] | None = None) -> None:
         self._dictionary = dictionary
+        self._clock = clock or _utc_now
 
     @staticmethod
     def _resource_key(transition_session_id: str) -> str:
@@ -241,6 +292,10 @@ class ModalTransitionSessionStore:
     @staticmethod
     def _sizes_key(transition_session_id: str) -> str:
         return f"transition-chunk-sizes:{transition_session_id}"
+
+    @staticmethod
+    def _claim_key(transition_session_id: str, index: int) -> str:
+        return f"transition-claim:{transition_session_id}:{index}"
 
     def create(self, resource: dict[str, Any]) -> None:
         self._dictionary.put(self._resource_key(resource["transition_session_id"]), resource)
@@ -302,6 +357,36 @@ class ModalTransitionSessionStore:
             self._dictionary.pop(self._processed_key(transition_session_id, index), None)
         self._dictionary.pop(self._sizes_key(transition_session_id), None)
 
+    def try_claim(self, transition_session_id: str, index: int, *, lease_seconds: float) -> str | None:
+        key = self._claim_key(transition_session_id, index)
+        token = uuid.uuid4().hex
+        claim = {"token": token, "claimed_at": _iso(self._clock())}
+        if self._dictionary.put(key, claim, skip_if_exists=True):
+            return token
+        existing = self._dictionary.get(key)
+        if not isinstance(existing, dict):
+            return None
+        claimed_at = _parse_timestamp(existing.get("claimed_at"))
+        if claimed_at is not None and (
+            self._clock() - claimed_at
+        ).total_seconds() < lease_seconds:
+            return None
+        # The lease is stale (or unreadable).  Steal it only while the stored token still
+        # matches what we read; otherwise another container already took the index.
+        current = self._dictionary.get(key)
+        if not isinstance(current, dict) or current.get("token") != existing.get("token"):
+            return None
+        self._dictionary.pop(key, None)
+        if self._dictionary.put(key, claim, skip_if_exists=True):
+            return token
+        return None
+
+    def release_claim(self, transition_session_id: str, index: int, token: str) -> None:
+        key = self._claim_key(transition_session_id, index)
+        claim = self._dictionary.get(key)
+        if isinstance(claim, dict) and claim.get("token") == token:
+            self._dictionary.pop(key, None)
+
 
 class TransitionService:
     """One product interface over session state, queueing, and continuous-inference adapters."""
@@ -315,6 +400,8 @@ class TransitionService:
         max_chunk_bytes: int = 10 * 1024 * 1024,
         max_queued_bytes: int = 100 * 1024 * 1024,
         processing_deadline_seconds: float = 30.0,
+        idle_timeout_seconds: float = 300.0,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -322,11 +409,17 @@ class TransitionService:
         self._max_chunk_bytes = max_chunk_bytes
         self._max_queued_bytes = max_queued_bytes
         self._processing_deadline_seconds = processing_deadline_seconds
+        self._idle_timeout_seconds = idle_timeout_seconds
+        self._claim_lease_seconds = 2 * processing_deadline_seconds + 30.0
+        self._clock = clock or _utc_now
         self._drain_lock = threading.Lock()
+
+    def _timestamp(self) -> str:
+        return _iso(self._clock())
 
     def create(self) -> dict[str, Any]:
         session_id = _identifier("trs")
-        created_at = _now()
+        created_at = self._timestamp()
         resource: dict[str, Any] = {
             "transition_session_id": session_id,
             "status": "starting",
@@ -345,6 +438,7 @@ class TransitionService:
         resource = self._store.get(transition_session_id)
         if resource is None:
             raise NotFound(f"No transition session with id {transition_session_id!r}.")
+        resource = self._expire_if_idle(transition_session_id, resource)
         if cursor is not None and cursor not in {
             event["transition_event_id"] for event in resource["events"]
         }:
@@ -388,7 +482,7 @@ class TransitionService:
             )
         if outcome == "stored":
             resource["_known_indices"].append(index)
-            resource["updated_at"] = _now()
+            resource["updated_at"] = self._timestamp()
             self._store.put(transition_session_id, resource)
             self._runner.submit(lambda: self._drain(transition_session_id))
         return {
@@ -427,7 +521,7 @@ class TransitionService:
             self._fail(resource, "TRANSITION_ADAPTER_FAILED")
             return
         resource["status"] = "active"
-        resource["updated_at"] = _now()
+        resource["updated_at"] = self._timestamp()
         self._store.put(transition_session_id, resource)
         self._drain(transition_session_id)
 
@@ -441,6 +535,18 @@ class TransitionService:
                 chunk = self._store.get_chunk(transition_session_id, index)
                 if chunk is None:
                     return
+                token = self._store.try_claim(
+                    transition_session_id, index, lease_seconds=self._claim_lease_seconds
+                )
+                if token is None:
+                    # Another container owns a fresh lease on this index.  Once the owner
+                    # advances `_next_index`, the next chunk PUT re-triggers the drain here.
+                    resource = self._store.get(transition_session_id)
+                    if resource is None or resource["status"] != "active":
+                        return
+                    if resource["_next_index"] == index:
+                        return
+                    continue
                 content, media_type = chunk
                 outcome, value = run_with_deadline(
                     lambda: self._adapter.process(transition_session_id, index, content, media_type),
@@ -448,11 +554,14 @@ class TransitionService:
                 )
                 resource = self._store.get(transition_session_id)
                 if resource is None or resource["status"] != "active":
+                    self._store.release_claim(transition_session_id, index, token)
                     return
                 if outcome != "result" or not isinstance(value, list):
+                    self._store.release_claim(transition_session_id, index, token)
                     self._fail(resource, "TRANSITION_ADAPTER_FAILED")
                     return
                 if not all(isinstance(observation, TransitionObservation) for observation in value):
+                    self._store.release_claim(transition_session_id, index, token)
                     self._fail(resource, "TRANSITION_ADAPTER_FAILED")
                     return
                 self._store.mark_processed(transition_session_id, index, content)
@@ -464,8 +573,9 @@ class TransitionService:
                     }
                     for observation in value
                 )
-                resource["updated_at"] = _now()
+                resource["updated_at"] = self._timestamp()
                 self._store.put(transition_session_id, resource)
+                self._store.release_claim(transition_session_id, index, token)
 
     def _fail(self, resource: dict[str, Any], code: str) -> None:
         resource["status"] = "failed"
@@ -474,9 +584,36 @@ class TransitionService:
             "message": "Transition processing could not be completed.",
             "retryable": code == "TRANSITION_ADAPTER_FAILED",
         }
-        resource["updated_at"] = _now()
+        resource["updated_at"] = self._timestamp()
         self._store.clear_chunks(resource["transition_session_id"], resource["_known_indices"])
         self._store.put(resource["transition_session_id"], resource)
+
+    def _expire_if_idle(self, transition_session_id: str, resource: dict[str, Any]) -> dict[str, Any]:
+        if self._idle_timeout_seconds <= 0 or resource["status"] != "active":
+            return resource
+        updated_at = _parse_timestamp(resource.get("updated_at"))
+        if updated_at is None:
+            return resource
+        if (self._clock() - updated_at).total_seconds() < self._idle_timeout_seconds:
+            return resource
+        resource["status"] = "failed"
+        resource["failure"] = {
+            "code": "TRANSITION_ADAPTER_FAILED",
+            "message": "The transition session expired after a period of inactivity.",
+            "retryable": False,
+        }
+        resource["updated_at"] = self._timestamp()
+        self._store.clear_chunks(transition_session_id, resource["_known_indices"])
+        self._store.put(transition_session_id, resource)
+        try:
+            run_with_deadline(
+                lambda: self._adapter.stop(transition_session_id), self._processing_deadline_seconds
+            )
+        except Exception:
+            # Stop was accepted locally; a worker-specific cleanup failure cannot resurrect an
+            # expired session or make it accept more media.
+            pass
+        return resource
 
     @staticmethod
     def _public(resource: dict[str, Any], cursor: str | None) -> dict[str, Any]:
